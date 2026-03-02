@@ -7,7 +7,7 @@ on:
 
 env:
   REGISTRY: docker.io
-  IMAGE_NAME: danuk/shm
+  IMAGE_NAME: idsmef/vbios
 
 jobs:
   build:
@@ -90,7 +90,7 @@ jobs:
         load: true
         target: core
         platforms: linux/amd64
-        tags: shm-core:test
+        tags: vbios-core:test
         cache-from: type=gha,scope=core
         cache-to: type=gha,mode=max,scope=core
 
@@ -98,7 +98,7 @@ jobs:
       run: |
         docker run --rm \
           -v ${{ github.workspace }}/app:/app \
-          shm-core:test \
+          vbios-core:test \
           prove -r -j4 /app/t/unit/
 
     - name: Build and push API image
