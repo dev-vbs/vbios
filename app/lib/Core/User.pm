@@ -458,7 +458,7 @@ sub passwd_reset_request {
                 reset_password_verify_expires => $expires,
             });
 
-            my $project_name = $config->data_by_name('company')->{name} || 'SHM';
+            my $project_name = $config->data_by_name('company')->{name} || 'vBios';
             my $subject = "$project_name - Сброс пароля";
             my $url = $config->data_by_name('cli')->{url};
             my $link = $url ? "$url?token=$token" : undef;
@@ -590,7 +590,7 @@ sub verify_email {
             email_verify_expires => $expires,
         });
 
-        my $project_name = get_service('config')->data_by_name('company')->{name} || 'SHM';
+        my $project_name = get_service('config')->data_by_name('company')->{name} || 'vBios';
         my $subject = "$project_name - Код подтверждения email";
         my $message = "Ваш код подтверждения: $code\n\nКод действителен 10 минут.";
 
