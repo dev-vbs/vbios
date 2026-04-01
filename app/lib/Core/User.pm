@@ -15,6 +15,7 @@ use Core::Utils qw(
     add_date_time
     hash_merge
     add_period
+    round
 );
 use Core::Const;
 
@@ -1029,16 +1030,16 @@ sub recash {
 
     return {
         before => {
-            balance => sprintf("%.2f", $before{balance} ),
-            bonus => sprintf("%.2f", $before{bonus} ),
+            balance => round( $before{balance} ),
+            bonus => round( $before{bonus} ),
         },
         after => {
-            balance => sprintf("%.2f", $self->balance ),
-            bonus => sprintf("%.2f", $self->get_bonus ),
+            balance => round( $self->balance ),
+            bonus => round( $self->get_bonus ),
         },
         delta => {
-            balance => sprintf("%.2f", $self->balance - $before{balance}),
-            bonus => sprintf("%.2f", $self->get_bonus - $before{bonus}),
+            balance => round( $self->balance - $before{balance}),
+            bonus => round( $self->get_bonus - $before{bonus}),
         }
     };
 }
@@ -1235,13 +1236,19 @@ sub referrals {
 sub referrals_count {
     my $self = shift;
 
-    my @count = $self->_list(
+    my $ret = $self->count(
+        fields => [''],
         where => {
             partner_id => $self->id,
         },
     );
 
-    return scalar @count;
+    return $ret->{rows_count};
+}
+
+sub api_referrals {
+    my $self = shift;
+    return { total => $self->referrals_count };
 }
 
 sub switch {
