@@ -606,6 +606,22 @@ sub set_email {
         return { msg => 'is not email' };
     }
 
+    my ( $existing ) = $self->_list(
+        where => {
+            user_id => { '!=' => $self->id },
+            -OR => [
+                { login  => $args{email} },
+                { login2 => $args{email} },
+                { sprintf('%s->>"$.%s"', 'settings', 'email') => $args{email} },
+            ],
+        },
+        limit => 1,
+    );
+
+    if ( $existing ) {
+        return { msg => 'already in use' };
+    }
+
     my $verified = 0;
     my $current_email = $self->user->emails;
     if ( $current_email && $current_email eq $args{email} ) {
@@ -765,10 +781,65 @@ sub gen_captcha {
     my $token = encode_base64url( "$answer|$timestamp|$sig" );
     $token =~ s/=+$//;
 
+    my $question = "$a $op $b = ?";
+    my $image = $self->gen_captcha_svg( $question );
+
     return {
-        question => "$a $op $b",
-        token    => $token,
+        image => $image,
+        token => $token,
     };
+}
+
+sub gen_captcha_svg {
+    my $self = shift;
+    my $text = shift;
+
+    my $width  = 200;
+    my $height = 70;
+
+    my @chars = split //, $text;
+    my $chars_svg = '';
+    my $x = 15;
+
+    for my $ch ( @chars ) {
+        my $y      = 35 + int( rand(20) ) - 10;
+        my $rotate = int( rand(30) ) - 15;
+        my $size   = 24 + int( rand(8) );
+        my @fonts  = ('monospace', 'serif', 'sans-serif');
+        my $font   = $fonts[ int( rand( scalar @fonts ) ) ];
+        $chars_svg .= sprintf(
+            '<text x="%d" y="%d" font-size="%d" font-family="%s" fill="#333" transform="rotate(%d %d %d)">%s</text>',
+            $x, $y, $size, $font, $rotate, $x, $y, $ch eq '&' ? '&amp;' : $ch,
+        );
+        $x += $ch eq ' ' ? 10 : 18 + int( rand(5) );
+    }
+
+    my $lines_svg = '';
+    for ( 1 .. 4 ) {
+        my ($x1, $y1, $x2, $y2) = ( int(rand($width)), int(rand($height)), int(rand($width)), int(rand($height)) );
+        my @colors = ('#999','#aaa','#bbb','#888');
+        $lines_svg .= sprintf(
+            '<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="%s" stroke-width="1"/>',
+            $x1, $y1, $x2, $y2, $colors[ int(rand(scalar @colors)) ],
+        );
+    }
+
+    my $dots_svg = '';
+    for ( 1 .. 30 ) {
+        my ($cx, $cy) = ( int(rand($width)), int(rand($height)) );
+        $dots_svg .= sprintf( '<circle cx="%d" cy="%d" r="1" fill="#aaa"/>', $cx, $cy );
+    }
+
+    my $svg = sprintf(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="0 0 %d %d">'
+        . '<rect width="100%%" height="100%%" fill="#f5f5f5"/>'
+        . '%s%s%s'
+        . '</svg>',
+        $width, $height, $width, $height,
+        $lines_svg, $dots_svg, $chars_svg,
+    );
+
+    return encode_base64( $svg, '' );
 }
 
 sub verify_captcha {
