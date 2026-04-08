@@ -226,6 +226,7 @@ sub task_send {
         task => $task,
         vars => {
             tg => sub { $self },
+            telegram => sub { $self },
             tg_api => sub{ $self->tg_api( @_ ) },
             response => sub { $self->response },
         },
@@ -973,6 +974,7 @@ sub get_script {
         task => $self->{task} || undef,
         vars => {
             tg => sub { $self },
+            telegram => sub { $self },
             cmd => $cmd,
             message => $self->message,
             response => sub { $self->response },
@@ -1309,6 +1311,8 @@ sub web_auth {
     my %args = (
         profile   => 'telegram_bot',
         register_if_not_exists => 0,
+        bind_to_profile => 0,
+        user_id => undef,
         @_,
     );
 
@@ -1350,6 +1354,38 @@ sub web_auth {
     if (time - $in{auth_date} > 86400) {
         report->error("Telegram auth data too old");
         return undef;
+    }
+
+    if ( $args{user_id} && $self->user->id($args{user_id}) ) {
+        switch_user( $args{user_id} );
+        if ( $args{bind_to_profile} ) {
+            my $login2 = $in{username} ? $in{username} : '@' . $in{id};
+            unless ( $self->user->get_login2 ) {
+                $self->user->set( login2 => $login2 );
+            }
+            my $settings = $self->user->settings->{telegram} || {};
+            if ( !$settings->{user_id} ) {
+                $self->user->set_json(
+                    'settings', {
+                        telegram => {
+                            user_id    => $in{id},
+                            username   => $in{username},
+                            login      => $in{username},
+                            first_name => $in{first_name} || '',
+                            last_name  => $in{last_name}  || '',
+                            chat_id    => $in{id},
+                            $profile   => {
+                                chat_id => $in{id},
+                                status  => 'member',
+                            },
+                        },
+                    },
+                );
+                return { msg => 'Successfully bound to Telegram' };
+            } else {
+                return { error => 'Already bound to Telegram' };
+            }
+        }
     }
 
     my $chat_id = $in{id};

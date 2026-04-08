@@ -1,4 +1,4 @@
-package Core::Passkey;
+package Core::User::Passkey;
 
 use v5.14;
 
@@ -81,6 +81,9 @@ sub get_enabled {
 
 sub get_rp_id {
     my $self = shift;
+
+    my $rp_id = cfg('passkey')->{rp_id};
+    return $rp_id if $rp_id;
 
     return $ENV{PASSKEY_RP_ID} if $ENV{PASSKEY_RP_ID};
 
@@ -353,7 +356,7 @@ sub api_auth_public {
     $self->set_settings($user, verified_at => now());
 
     # Также отмечаем OTP как верифицированный (если включен)
-    my $otp = get_service('OTP');
+    my $otp = get_service('User::OTP');
     $otp->set_settings($user, verified_at => now()) if $otp->get_enabled($user);
 
     return { id => $user->gen_session->{id} };
