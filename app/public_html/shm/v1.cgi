@@ -1271,6 +1271,16 @@ state $routes //= {
             summary => 'Изменить настройки пользователя для Telegram бота',
         },
     },
+    DELETE => {
+        controller => 'Transport::Telegram',
+        method => 'api_delete_user_tg_settings',
+        args => {
+            format => 'json',
+        },
+        swagger => {
+            summary => 'Удалить (отвязать) Telegram аккаунт пользователя',
+        },
+    },
 },
 '/telegram/bot' => {
     POST => {
@@ -1445,6 +1455,35 @@ state $routes //= {
                             },
                         },
                     },
+                },
+            },
+        },
+    },
+},
+'/telegram/web/auth/start' => {
+    swagger => {
+        tags => 'Telegram bot',
+    },
+    GET => {
+        skip_check_auth => 1,
+        controller => 'Transport::Telegram',
+        method => 'telegram_oidc_start_redirect',
+        args => {
+            format => 'json',
+            profile => 'telegram_bot',
+            redirect_uri => undef,
+            return_url => undef,
+            scope => 'openid profile',
+            register_if_not_exists => 0,
+            bind_to_profile => 0,
+            uid => undef,
+            ttl => 600,
+        },
+        swagger => {
+            summary => 'Старт Telegram Login OIDC с HTTP redirect на Telegram OAuth',
+            responses => {
+                '302' => {
+                    description => 'Redirect to Telegram OAuth',
                 },
             },
         },

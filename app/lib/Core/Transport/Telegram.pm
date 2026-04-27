@@ -56,8 +56,6 @@ sub init {
     );
 
     $self->{server} = $self->config->{server} || 'https://api.telegram.org';
-
-    $self->{http_transport} = get_service('Transport::Http');
     $self->{webhook} = 0;
     $self->{deny_answer_direct} = 1;
 
@@ -106,6 +104,24 @@ sub api_set_user_tg_settings {
         telegram => $json,
     });
     return $self->user->settings->{telegram} || {};
+}
+
+sub api_delete_user_tg_settings {
+    my $self = shift;
+
+    my $username = $self->user_tg_settings->{username};
+    my $login2 = $self->user->get_login2;
+
+    if ( defined $username && $username ne '' && defined $login2 && $login2 ne '' ) {
+        if ( $login2 eq $username || $login2 eq '@' . $username ) {
+            $self->user->set( login2 => undef );
+        }
+    }
+
+    $self->user->set_settings({
+        telegram => {},
+    });
+    return { msg => 'Telegram settings deleted successfully' };
 }
 
 # methods for Templates
@@ -531,7 +547,7 @@ sub http {
         method => $method,
         url => sprintf('%s/bot%s/%s', $self->{server}, $self->token, $url ),
         content_type => $args{content_type},
-        content => encode_utf8( $content ),
+        content => $content,
     );
 
     logger->dump('Send to TG API', $response->request );
@@ -780,6 +796,38 @@ sub telegram_oidc_init {
     };
 }
 
+sub telegram_oidc_start_redirect {
+    my $self = shift;
+    my %args = @_;
+
+    my $payload = $self->telegram_oidc_init(%args);
+    return undef unless $payload;
+
+    my $auth_url = $payload->{auth_url};
+    unless ( $auth_url ) {
+        report->error('Telegram OIDC auth_url is empty');
+        return undef;
+    }
+
+    if ( $ENV{SHM_TEST} ) {
+        return {
+            status => 302,
+            redirect => $auth_url,
+            %{$payload},
+        };
+    }
+
+    print_header(
+        status => 302,
+        Location => $auth_url,
+    );
+    print_json({
+        status => 302,
+        redirect => $auth_url,
+    });
+    exit 0;
+}
+
 sub telegram_oidc_client_id {
     my $self = shift;
     my %args = (
@@ -861,12 +909,15 @@ sub telegram_oidc_exchange_code {
 
     my $credentials = encode_base64("$client_id:$client_secret", '');
 
-    my $response = $self->{lwp}->post(
-        'https://oauth.telegram.org/token',
-        'Content-Type' => 'application/x-www-form-urlencoded',
-        'Accept' => 'application/json',
-        'Authorization' => "Basic $credentials",
-        Content => $content,
+    my $response = $self->http_transport->http(
+        method => 'post',
+        url => 'https://oauth.telegram.org/token',
+        content_type => 'application/x-www-form-urlencoded',
+        headers => {
+            Accept => 'application/json',
+            Authorization => "Basic $credentials",
+        },
+        content => $content,
     );
 
     unless ( $response->is_success ) {
@@ -899,7 +950,10 @@ sub telegram_oidc_jwks {
         return $cache->{keys};
     }
 
-    my $response = $self->{lwp}->get('https://oauth.telegram.org/.well-known/jwks.json');
+    my $response = $self->http_transport->http(
+        method => 'get',
+        url => 'https://oauth.telegram.org/.well-known/jwks.json',
+    );
     unless ( $response->is_success ) {
         report->error('Telegram OIDC jwks request failed');
         return [];
@@ -1718,7 +1772,7 @@ sub web_auth {
     if ( $args{uid} && $self->user->id($args{uid}) ) {
         switch_user( $args{uid} );
         if ( $args{bind_to_profile} ) {
-            my $login2 = $in{username} ? $in{username} : '@' . $in{id};
+            my $login2 = '@' . $in{id};
             unless ( $self->user->get_login2 ) {
                 $self->user->set( login2 => $login2 );
             }
