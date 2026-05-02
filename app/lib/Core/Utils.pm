@@ -14,6 +14,8 @@ use List::Util qw(
     uniq
 );
 
+use Digest::SHA qw(hmac_sha256 hmac_sha256_hex sha256_hex sha256 sha512_hex hmac_sha512_hex sha512 hmac_sha512);
+
 use base qw(Exporter);
 
 our @EXPORT = qw(
@@ -54,9 +56,13 @@ our @EXPORT_OK = qw(
     is_email
     is_host
     html_escape
+    html_unescape
     hash_merge
     blessed
     get_random_value
+    random_bytes
+    random_base64url
+    jwt_decode
     to_query_string
     dots_str_to_sql
     uuid_gen
@@ -81,6 +87,7 @@ our @EXPORT_OK = qw(
     round_up
     round_down
     round
+    hmac_sha256 hmac_sha256_hex sha256_hex sha256 sha512_hex hmac_sha512_hex sha512 hmac_sha512
 );
 
 use Core::System::ServiceManager qw( get_service delete_service );
@@ -530,6 +537,24 @@ sub html_escape {
     return $data;
 }
 
+sub html_unescape {
+    my $data = shift;
+
+    my %map = (
+        '&amp;'  => '&',
+        '&lt;'   => '<',
+        '&gt;'   => '>',
+        '&quot;' => '"',
+        '&#39;'  => "'",
+        '&#x2F;' => '/',
+    );
+
+    my $pattern = join '|', keys %map;
+    $data =~ s/($pattern)/$map{$1}/g;
+
+    return $data;
+}
+
 sub encode_base64 {
     return MIME::Base64::encode_base64( shift, '' );
 }
@@ -546,6 +571,11 @@ sub decode_base64url {
     return MIME::Base64::decode_base64url( shift );
 }
 
+sub jwt_decode {
+    require Crypt::JWT;
+    return Crypt::JWT::decode_jwt(@_);
+}
+
 sub hash_merge {
     my ($left, @right) = @_;
     $left = {} if ref $left ne 'HASH';
@@ -553,11 +583,25 @@ sub hash_merge {
     for my $right (@right) {
         next if ref $right ne 'HASH';
         for my $key (keys %$right) {
-            if (ref($right->{$key}) eq 'HASH' && ref($left->{$key}) eq 'HASH') {
-                $left->{$key} = hash_merge($left->{$key}, $right->{$key});
-            } else {
-                $left->{$key} = $right->{$key};
+            my $value = $right->{$key};
+
+            if ( !defined $value ) {
+                delete $left->{$key};
+                next;
             }
+
+            if ( ref($value) eq 'HASH' ) {
+                if ( !keys %{$value} ) {
+                    $left->{$key} = {};
+                    next;
+                }
+
+                my $base = ref($left->{$key}) eq 'HASH' ? $left->{$key} : {};
+                $left->{$key} = hash_merge($base, $value);
+                next;
+            }
+
+            $left->{$key} = $value;
         }
     }
     return $left;
@@ -700,14 +744,38 @@ sub get_random_value {
     }
 }
 
+sub random_bytes {
+    my $len = shift;
+    $len = 32 unless defined $len;
+    $len = int($len);
+    return '' if $len < 1;
+
+    my $bytes = '';
+    if ( open my $fh, '<:raw', '/dev/urandom' ) {
+        my $read = read( $fh, $bytes, $len );
+        close $fh;
+        return $bytes if defined $read && $read == $len;
+    }
+
+    # Fallback for environments where /dev/urandom is unavailable.
+    return join('', map { chr(int(rand(256))) } 1..$len );
+}
+
+sub random_base64url {
+    my $len = shift;
+    $len = 32 unless defined $len;
+    return encode_base64url( random_bytes($len) );
+}
+
 sub to_query_string {
     my $data = shift;
-    return undef unless $data ne 'HASH';
+    return undef unless ref $data eq 'HASH';
 
-    use URI::Escape;
+    use URI::Escape qw( uri_escape_utf8 );
     my @ret;
-    for ( keys %$data ) {
-        push @ret, sprintf("%s=%s", $_, uri_escape_utf8( $data->{ $_ } ));
+    for my $k ( sort keys %$data ) {
+        my $v = defined $data->{ $k } ? $data->{ $k } : '';
+        push @ret, sprintf("%s=%s", uri_escape_utf8($k), uri_escape_utf8($v));
     }
     return join('&', @ret );
 }

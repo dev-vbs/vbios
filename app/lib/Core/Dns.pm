@@ -6,6 +6,7 @@ use Core::Base;
 use Data::Validate::Domain qw/is_domain/;
 
 sub table { return 'dns_services' };
+sub dbh { shift->dbh_myisam };
 
 sub structure {
     return {

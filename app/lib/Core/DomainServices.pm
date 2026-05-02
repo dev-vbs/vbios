@@ -5,6 +5,7 @@ use parent 'Core::Base';
 use Core::Base;
 
 sub table { return 'domains_services' };
+sub dbh { shift->dbh_myisam };
 
 sub structure {
     return {

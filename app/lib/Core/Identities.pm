@@ -11,6 +11,7 @@ use Core::Utils qw(
 );
 
 sub table { return 'identities' };
+sub dbh { shift->dbh_myisam };
 
 sub structure {
     return {

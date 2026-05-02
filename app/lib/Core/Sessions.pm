@@ -6,6 +6,7 @@ use Core::Base;
 use Core::Utils qw( now );
 
 sub table { return 'sessions' };
+sub dbh { shift->dbh_myisam };
 
 sub table_allow_insert_key { return 1 };
 
