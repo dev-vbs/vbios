@@ -268,17 +268,9 @@ sub price_list {
     );
 
     for my $si ( keys %$list ) {
-        if ( $list->{ $si }->{config}->{order_only_once} ) {
-            my @wd = get_service('wd')->list(
-                where => {
-                    service_id => $si,
-                },
-                limit => 1,
-            );
-            if ( scalar @wd ) {
-                delete $list->{ $si };
-                next;
-            }
+        if ( $list->{ $si }->{config}->{order_only_once} && $self->was_ever_provided( $si ) ) {
+            delete $list->{ $si };
+            next;
         }
 
         if ( $list->{ $si }->{is_composite} ) {
@@ -305,11 +297,23 @@ sub price_list {
         $list->{ $si }->{partial_renew} = $partial_renew;
         $list->{ $si }->{discount} = $discount;
         $list->{ $si }->{cost_discount} = $cost_discount;
-        $list->{ $si }->{real_cost} = $real_cost;
+        $list->{ $si }->{real_cost} = $cost - $cost_discount;
+        $list->{ $si }->{real_cost_with_bonuses} = $real_cost;
         $list->{ $si }->{cost_bonus} = $bonus;
     }
 
     return $list;
+}
+
+sub was_ever_provided {
+    my $self = shift;
+    my $service_id = shift;
+
+    my @wd = get_service('wd')->list(
+        where => { service_id => $service_id },
+        limit => 1,
+    );
+    return scalar @wd ? 1 : 0;
 }
 
 sub api_price_list {
