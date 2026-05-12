@@ -12,6 +12,7 @@ use Email::Sender::Simple qw(sendmail);
 use Email::Sender::Transport::SMTP qw();
 use Try::Tiny;
 use MIME::Base64 qw(encode_base64);
+use MIME::Words qw(encode_mimewords);
 use Core::Utils qw(
     is_email
     encode_utf8
@@ -135,42 +136,9 @@ sub task_send {
         }
     }
 
-    my $message;
-    if ( $settings{template_id} || $settings{template_name} ) {
-        my $template;
-        if ( $settings{template_id} ) {
-            $template = get_service('template', _id => $settings{template_id} );
-            unless ( $template ) {
-                return undef, {
-                    error => "template with id `$settings{template_id}` not found",
-                }
-            }
-        } elsif ( $settings{template_name} ) {
-            $template = get_service('template')->id( $settings{template_name} );
-            unless ( $template ) {
-                return undef, {
-                    error => "template with name `$settings{template_name}` not found",
-                }
-            }
-        }
-
-        $message = $template->parse(
-            $task->settings->{user_service_id} ? ( usi => $task->settings->{user_service_id} ) : (),
-            task => $task,
-        );
-
-        %settings = (
-            %settings,
-            %{ $template->settings || {} },
-        );
-    }
-
-    $message ||= delete $settings{message};
-    return SUCCESS, { msg => "The message is empty, skip it." } unless $message;
-
     return $self->send_mail(
-        message => $message,
         host => $server{host},
+        task => $task,
         %settings,
     );
 }
@@ -184,9 +152,45 @@ sub send_mail {
         subject => 'SHM',
         from_name => 'SHM',
         message => undef,
+        template_id => undef,
+        template_name => undef,
+        task => undef,
         content_type => undef,
         @_,
     );
+
+    my $task = delete $args{task};
+
+    if ( !$args{message} && ( $args{template_id} || $args{template_name} ) ) {
+        my $template;
+        if ( $args{template_id} ) {
+            $template = get_service('template', _id => $args{template_id} );
+            unless ( $template ) {
+                return undef, {
+                    error => "template with id `$args{template_id}` not found",
+                };
+            }
+        } elsif ( $args{template_name} ) {
+            $template = get_service('template')->id( $args{template_name} );
+            unless ( $template ) {
+                return undef, {
+                    error => "template with name `$args{template_name}` not found",
+                };
+            }
+        }
+
+        $args{message} = $template->parse(
+            $task && $task->settings->{user_service_id} ? ( usi => $task->settings->{user_service_id} ) : (),
+            $task ? ( task => $task ) : (),
+        );
+
+        %args = (
+            %args,
+            %{ $template->settings || {} },
+        );
+    }
+
+    return SUCCESS, { msg => "The message is empty, skip it." } unless $args{message};
 
     $args{content_type} ||= 'text/plain';
 
@@ -212,17 +216,29 @@ sub send_mail {
 
     %args = %{ encode_utf8( \%args ) };
 
+    my $encoded_from_name = encode_mimewords(
+        $args{from_name} // '',
+        Charset  => 'UTF-8',
+        Encoding => 'B',
+    );
+
+    my $encoded_subject = encode_mimewords(
+        $args{subject} // '',
+        Charset  => 'UTF-8',
+        Encoding => 'B',
+    );
+
     my $email = Email::Simple->create(
         header => [
-            From    => sprintf("=?UTF-8?B?%s?= <%s>", MIME::Base64::encode_base64($args{from_name}, ''), $args{from} ),
+            From    => sprintf("%s <%s>", $encoded_from_name, $args{from} ),
             To      => $args{to},
             Cc      => $args{cc} || "",
             BCc     => $args{bcc} || "",
-            Subject => sprintf("=?UTF-8?B?%s?=", MIME::Base64::encode_base64($args{subject}, '')),
+            Subject => $encoded_subject,
             'Content-Type' => "$args{content_type}; charset=UTF-8",
             'Content-Transfer-Encoding' => 'base64',
         ],
-        body => MIME::Base64::encode_base64($args{message}, ""),
+        body => MIME::Base64::encode_base64($args{message}, "\n"),
     );
 
     my $err;
