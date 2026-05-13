@@ -38,11 +38,13 @@ sub send {
 
     my $server_group = get_service('ServerGroups', _id => $self->{server_gid} );
     unless ( $server_group ) {
+        $self->logger->error("Server group not exists:", $self->{server_gid});
         return undef;
     }
 
     my ( $server ) = $server_group->get_servers();
     unless ( $server ) {
+        $self->logger->error("Server not found in server group:", $self->{server_gid});
         return undef;
     }
 
@@ -57,14 +59,23 @@ sub send {
     my ( $status, $response ) = $self->send_mail(
         host => $self->{host},
         from => $self->{from},
-        to => $self->{to},
+        to => $self->{to} || $self->user->email,
         subject => $self->{subject} || 'SHM',
         from_name => $self->{from_name} || 'SHM',
         content_type => $self->{content_type},
         message => $message,
         %data,
     );
-    return $status;
+
+    if ( ref $response eq 'HASH' ) {
+        if ( $response->{error} ) {
+            $self->logger->error( $response->{error} );
+        } else {
+            $self->logger->debug( $response );
+        }
+    }
+
+    return $status, $response;
 }
 
 sub task_send {
@@ -107,20 +118,17 @@ sub task_send {
     my $config = get_service("config", _id => 'mail');
     $config = $config ? $config->get_data : {};
 
-    $settings{from} //= $config->{from};
+    $settings{from} ||= $config->{from};
     unless ( $settings{from} ) {
         return undef, {
             error => "From undefined",
         }
     }
 
-    $settings{from_name} //= $config->{from_name};
-    $settings{subject} //= $config->{subject};
-    $settings{to} //= delete $settings{bcc};
+    $settings{from_name} ||= $config->{from_name};
+    $settings{subject} ||= $config->{subject};
+    $settings{to} ||= delete $settings{bcc} || $self->user->email;
 
-    if ( my $email = get_service('user')->emails ) {
-        $settings{to} = $email;
-    }
     unless ( $settings{to} ) {
         return SUCCESS, {
             error => "User email undefined. For test email set `bcc` in server",
@@ -223,20 +231,35 @@ sub send_mail {
     unless ( $ENV{SHM_TEST} ) {
         my ( $host, $port ) = split(/:/, $args{host} );
 
+        # Empty string means "not set" (common for UI forms); let port defaults decide.
+        my $ssl = defined $args{ssl} && $args{ssl} ne '' ? $args{ssl} : undef;
+        my $starttls = defined $args{starttls} && $args{starttls} ne '' ? $args{starttls} : undef;
+
+        # Email::Sender::Transport::SMTP expects TLS mode via `ssl`:
+        #   ssl => 'ssl'      for direct TLS
+        #   ssl => 'starttls' for STARTTLS upgrade
+        my $tls_mode;
+        if ( defined $ssl ) {
+            $tls_mode = $ssl ? 'ssl' : '';
+        } elsif ( defined $starttls ) {
+            $tls_mode = $starttls ? 'starttls' : '';
+        }
+
+        # Auto-select TLS mode by port only when no explicit flags were provided.
+        unless ( defined $ssl || defined $starttls ) {
+            if ( $port == 465 ) {
+                $tls_mode = 'ssl';
+            } elsif ( $port == 587 || $port == 25 ) {
+                $tls_mode = 'starttls';
+            }
+        }
+
         my %smtp_params = (
             host    => $host,
             port    => $port || 25,
             timeout => $args{timeout} || 30,
-            defined $args{ssl} ? ( ssl => $args{ssl} ) : (),
-            defined $args{starttls} ? ( starttls => $args{starttls} ) : (),
+            $tls_mode ? ( ssl => $tls_mode ) : (),
         );
-
-        # Определяем тип шифрования
-        if ( $port == 465 ) {
-            $smtp_params{ssl} //= 1;       # Прямой SSL/TLS
-        } elsif ( $port == 587 || $port == 25 ) {
-            $smtp_params{starttls} //= 1;  # Команда STARTTLS внутри сессии
-        }
 
         # Добавляем авторизацию, если есть
         $smtp_params{sasl_username} = $args{user}     if $args{user};

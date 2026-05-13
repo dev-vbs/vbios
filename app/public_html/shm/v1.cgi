@@ -89,7 +89,7 @@ state $routes //= {
     GET => {
         controller => 'User',
         method => 'api_referrals',
-        swagger => { summary => 'Получение количество рефералов' },
+            swagger => { summary => 'Получение количества рефералов' },
     },
 },
 '/user/auth' => {
@@ -304,7 +304,7 @@ state $routes //= {
         controller => 'User',
         method => 'verify_email',
         optional => ['email', 'code'],
-        swagger => { summary => 'Верификацировать email пользователя' },
+        swagger => { summary => 'Верифицировать email пользователя' },
     },
     DELETE => {
         controller => 'User',
@@ -623,7 +623,7 @@ state $routes //= {
     },
     PUT => {
         controller => 'Service',
-        swagger => { summary => 'Создать услуг' },
+        swagger => { summary => 'Создать услугу' },
     },
     POST => {
         controller => 'Service',
@@ -706,6 +706,14 @@ state $routes //= {
         controller => 'User',
         required => ['user_id'],
         swagger => { summary => 'Удалить клиента' },
+    },
+},
+'/admin/user/search' => {
+    swagger => { tags => 'Пользователи' },
+    GET => {
+        controller => 'User',
+        method => 'api_search_for_admins',
+        swagger => { summary => 'Поиск клиентов' },
     },
 },
 '/admin/user/passwd' => {
@@ -1159,7 +1167,7 @@ state $routes //= {
         controller => 'Config',
         method => 'api_delete_value',
         required => ['value'],
-        swagger => { summary => 'Удалить значение или обьект внутри объекта конфига' },
+        swagger => { summary => 'Удалить значение или объект внутри объекта конфига' },
     },
 },
 '/admin/console' => {
@@ -1357,7 +1365,7 @@ state $routes //= {
             format => 'json',
         },
         swagger => {
-            summary => 'Авторизация через Telegram Widjet',
+            summary => 'Авторизация через Telegram Widget',
              responses => {
                 '200' => {
                     content => {
@@ -1652,10 +1660,11 @@ if ( my $p = $router->match( sprintf("%s:%s", $ENV{REQUEST_METHOD}, $uri )) ) {
 
     my $report = get_service('report');
     unless ( $report->is_success || $p->{skip_errors} ) {
-        my $status = $report->status || 400;
-        print_header( status => $status );
+        my %headers = $report->headers;
+        $headers{status} ||= 400;
+        print_header( %headers );
         my ( $err_msg ) = $report->errors;
-        print_json( { status => $status, error => $err_msg } );
+        print_json( { status => $headers{status}, error => $err_msg } );
         exit 0;
     }
 
