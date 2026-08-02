@@ -25,7 +25,7 @@ sub gen_swagger_json {
         },
         externalDocs => {
             description => 'Документация',
-            url => 'https://docs.myshm.ru/docs/api',
+            url => 'https://docs.vbios.tech/docs/api',
         },
         servers => [{
             url => '/shm/v1',
