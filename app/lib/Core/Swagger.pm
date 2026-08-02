@@ -20,7 +20,7 @@ sub gen_swagger_json {
     my %json = (
         openapi => '3.0.4',
         info => {
-            title => 'SHM API v1',
+            title => 'vBios API v1',
             version => get_service('config')->id( '_shm' )->get_data->{'version'},
         },
         externalDocs => {
