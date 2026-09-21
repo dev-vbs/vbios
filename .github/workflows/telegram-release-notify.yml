@@ -1,7 +1,7 @@
 name: 'Telegram Release Notification'
 
 env:
-  IMAGE_NAME: danuk/shm
+  IMAGE_NAME: idsmef/vbios
 
 on:
   workflow_run:
