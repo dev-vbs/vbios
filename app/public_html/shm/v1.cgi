@@ -69,6 +69,20 @@ state $routes //= {
         skip_check_auth => 1,
     },
 },
+'/system/auth' => {
+    swagger => {
+        tags => 'Авторизация',
+    },
+    GET => {
+        params => {},
+        skip_check_auth => 1,
+        controller => 'Config',
+        method => 'api_data_by_auth',
+        swagger => {
+            summary => 'Доступные способы входа (OAuth2-провайдеры, Telegram) и разрешения на регистрацию/вход/капчу через API',
+        },
+    },
+},
 '/user/captcha' => {
     swagger => { tags => 'Капча' },
     GET => {
@@ -98,6 +112,8 @@ state $routes //= {
             full_name => { type => 'string', required => 0, min_length => 1, max_length => 64 },
             phone => { type => 'string', required => 0, min_length => 1, max_length => 16 },
             partner_id => { type => 'integer', min => 2 },
+            captcha_token  => { type => 'string' },
+            captcha_answer => { type => 'string' },
         },
         swagger => { summary => 'Регистрация пользователя' },
     },
@@ -307,8 +323,9 @@ state $routes //= {
         controller => 'User',
         method => 'passwd',
         params => {
-            password => { type => 'string', required => 1, min_length => 6, max_length => 128 },
-            login    => { type => 'string', min_length => 1, max_length => 128 },
+            password     => { type => 'string', required => 1, min_length => 6, max_length => 128 },
+            old_password => { type => 'string', min_length => 1, max_length => 128 },
+            login        => { type => 'string', min_length => 1, max_length => 128 },
         },
     },
 },
@@ -412,6 +429,15 @@ state $routes //= {
         },
         swagger => { summary => 'Удаление услуги пользователя' },
     },
+    POST => {
+        controller => 'USObject',
+        method => 'api_add_description',
+        params => {
+            user_service_id => { type => 'integer', required => 1, min => 1 },
+            description     => { type => 'string', required => 1, max_length => 254 },
+        },
+        swagger => { summary => 'Изменить заметку пользователя об услуге' },
+    },
 },
 '/user/service/stop' => {
     swagger => { tags => 'Услуги пользователей' },
@@ -432,6 +458,7 @@ state $routes //= {
         params => {
             user_service_id => { type => 'integer', required => 1, min => 1 },
             service_id      => { type => 'integer', required => 1, min => 1 },
+            finish_active   => { type => 'boolean' },
         },
         swagger => { summary => 'Смена тарифа' },
     },
@@ -847,6 +874,44 @@ state $routes //= {
         swagger => { summary => 'Удаление клиента' },
     },
 },
+'/admin/user/group' => {
+    swagger => { tags => 'Группы пользователей' },
+    GET => {
+        params => {
+            gid  => { type => 'integer', min => 1 },
+        },
+        controller => 'User::Groups',
+        swagger => { summary => 'Получение списка групп пользователей' },
+    },
+    PUT => {
+        controller => 'User::Groups',
+        params => {
+            name           => { type => 'string', required => 1, min_length => 1, max_length => 255 },
+            is_admin       => { type => 'boolean' },
+            default_policy => { type => 'string', enum => ['allow','deny'] },
+            rules          => { type => 'array' },
+        },
+        swagger => { summary => 'Создание группы пользователей' },
+    },
+    POST => {
+        controller => 'User::Groups',
+        params => {
+            gid            => { type => 'integer', required => 1, min => 1 },
+            name           => { type => 'string', min_length => 1, max_length => 255 },
+            is_admin       => { type => 'boolean' },
+            default_policy => { type => 'string', enum => ['allow','deny'] },
+            rules          => { type => 'array' },
+        },
+        swagger => { summary => 'Изменение группы пользователей' },
+    },
+    DELETE => {
+        params => {
+            gid => { type => 'integer', required => 1, min => 1 },
+        },
+        controller => 'User::Groups',
+        swagger => { summary => 'Удаление группы пользователей' },
+    },
+},
 '/admin/user/search' => {
     swagger => { tags => 'Пользователи' },
     GET => {
@@ -1094,9 +1159,11 @@ state $routes //= {
         controller => 'USObject',
         method => 'change',
         params => {
-            user_id         => { type => 'integer', required => 1, min => 1 },
-            user_service_id => { type => 'integer', required => 1, min => 1 },
-            service_id      => { type => 'integer', required => 1, min => 1 },
+            user_id              => { type => 'integer', required => 1, min => 1 },
+            user_service_id      => { type => 'integer', required => 1, min => 1 },
+            service_id           => { type => 'integer', required => 1, min => 1 },
+            finish_active        => { type => 'boolean' },
+            allow_partial_period => { type => 'boolean' },
         },
         swagger => { summary => 'Смена тарифа услуги клиента' },
     },
@@ -1739,11 +1806,11 @@ state $routes //= {
 '/telegram/set_webhook' => {
     POST => {
         params => {
-            url         => { type => 'string', required => 1, min_length => 1, max_length => 2048 },
-            token       => { type => 'string', required => 1, min_length => 1, max_length => 128 },
-            secret      => { type => 'string', required => 1, min_length => 1, max_length => 128 },
-            template_id => { type => 'string', required => 1, min_length => 1 },
-            tg_profile  => { type => 'string', required => 1, min_length => 1 },
+            url             => { type => 'string', required => 1, min_length => 1, max_length => 2048 },
+            token           => { type => 'string', required => 1, min_length => 1, max_length => 128 },
+            secret          => { type => 'string', required => 1, min_length => 1, max_length => 128 },
+            template_id     => { type => 'string', required => 1, min_length => 1 },
+            tg_profile      => { type => 'string', required => 1, min_length => 1 },
             allowed_updates => { type => 'array' },
         },
         controller => 'Transport::Telegram',
@@ -1753,6 +1820,22 @@ state $routes //= {
         },
         swagger => {
             summary => 'Установка Webhook в Telegram бота',
+        },
+    },
+},
+'/telegram/delete_webhook' => {
+    POST => {
+        params => {
+            token => { type => 'string', required => 1, min_length => 1, max_length => 128 },
+        },
+        skip_check_auth => 1,
+        controller => 'Transport::Telegram',
+        method => 'delete_webhook',
+        args => {
+            format => 'json',
+        },
+        swagger => {
+            summary => 'Удаление Webhook в Telegram бота',
         },
     },
 },
@@ -2249,6 +2332,33 @@ $routes->{'/swagger_admin.json'} //= {
     },
 };
 
+$routes->{'/system/locations'} //= {
+    swagger => { tags => 'Служебное' },
+    GET => {
+        params => {},
+        controller => 'Swagger',
+        method => 'list_locations',
+        args => {
+            routes => $routes,
+        },
+        swagger => { summary => 'Список доступных локейшенов и методов (пользователи)' },
+    },
+};
+
+$routes->{'/admin/system/locations'} //= {
+    swagger => { tags => 'Служебное' },
+    GET => {
+        params => {},
+        controller => 'Swagger',
+        method => 'list_locations',
+        args => {
+            routes => $routes,
+            admin_mode => 1,
+        },
+        swagger => { summary => 'Список доступных локейшенов и методов (админ)' },
+    },
+};
+
 state $router //= Router::Simple->new();
 for my $uri ( keys %{ $routes } ) {
     for my $method ( 'GET','POST','PUT','DELETE' ) {
@@ -2295,13 +2405,27 @@ if ( my $p = $router->match( sprintf("%s:%s", $ENV{REQUEST_METHOD}, $uri )) ) {
         $admin_mode = 1;
     }
 
+    unless ( $p->{skip_check_auth} ) {
+        unless ( $user->can_access( uri => $uri, method => $ENV{REQUEST_METHOD} ) ) {
+            _log_api_call( $user, code => 403, error => 'Permission denied', descr => $api_descr );
+            print_header( status => 403 );
+            print_json( { status => 403, error => "Permission denied"} );
+            exit 0;
+        }
+    }
+
     my %args = (
         %{ $p->{args} || {} },
         %in,
         admin => $admin_mode,
     );
 
-    if ( $user->is_admin && $args{user_id} ) {
+    # User-switching (impersonation) is only allowed for a genuinely
+    # authenticated admin (session/login/basic-auth). Routes that force a
+    # fixed context user via route config (e.g. /public/* uses user_id => 1
+    # to run unauthenticated) must never honour a client-supplied user_id,
+    # otherwise an anonymous caller could impersonate any client.
+    if ( !$p->{user_id} && $user->is_admin && $args{user_id} ) {
         switch_user( $args{user_id} );
     } else {
         delete $args{user_id};
@@ -2619,7 +2743,7 @@ sub get_service_id {
 
 # Validate %args against a params schema defined in the route.
 # Schema format (per field):
-#   type         => 'integer' | 'number' | 'string' | 'email' | 'boolean'
+#   type         => 'integer' | 'number' | 'string' | 'email' | 'boolean' | 'object' | 'array'
 #   required     => 1   (field must be present and non-empty)
 #   min / max    => numeric bounds (for integer/number)
 #   min_length   => minimum string length

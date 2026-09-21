@@ -108,11 +108,10 @@ sub structure {
         },
         gid => {
             type => 'number',
-            default => 0,
+            default => 2,
             hide_for_user => 1,
-            enum => [0,1],
             title => 'группа',
-            description => '0 - пользователи, 1 - админы',
+            description => 'ссылка на user_groups.gid. По умолчанию 2 (обычные пользователи). 1 - системная группа админов',
         },
         perm_credit => {
             type => 'number',
@@ -294,7 +293,7 @@ sub auth_api_safe {
         $otp->set_settings($user, verified_at => now());
     }
 
-    my $session_id = $user->gen_session->{id};
+    my $session_id = $user->gen_session( login => $user->{login} )->{id};
 
     $user->set( last_login => now );
 
@@ -326,7 +325,7 @@ sub auth {
     my $password = $login_password || $self->get_password;
     return undef unless $password;
 
-    unless ( $self->verify_password( $args{password}, $password, $self->get_login ) ) {
+    unless ( $self->verify_password( $args{password}, $password, $login->get_login ) ) {
         report->warning('Incorrect login or password: ' . $login->get_login );
         return undef;
     }
@@ -353,68 +352,6 @@ sub auth {
     return $self;
 }
 
-sub passwd {
-    my $self = shift;
-    my %args = (
-        password     => undef,
-        old_password => undef,
-        @_,
-    );
-
-    my $report = get_service('report');
-    unless ( $args{password} ) {
-        $report->add_error('Password is empty');
-        return undef;
-    }
-
-    my $user = $self;
-
-    if ( $args{admin} && $args{user_id} ) {
-        $user = get_service('user', _id => $args{user_id} );
-    }
-
-    unless ( $args{admin} ) {
-        my $stored = $user->get->{password};
-
-        if ( $stored ) {
-            # User has an existing password — must verify it before changing.
-            unless ( $args{old_password} ) {
-                $report->add_error('OLD_PASSWORD_REQUIRED');
-                return undef;
-            }
-            unless ( $user->verify_password( $args{old_password}, $stored, $user->get_login ) ) {
-                $report->add_error('INVALID_OLD_PASSWORD');
-                return undef;
-            }
-        }
-        # If the user has no password stored (passkey-only account), allow setting
-        # a new password without verification.
-    }
-
-    my $password = $user->make_password( $args{password} );
-
-    get_service('sessions')->delete_user_sessions( user_id => $user->user_id );
-
-    $user->set( password => $password );
-    return scalar $user->get;
-}
-
-sub set_new_passwd {
-    my $self = shift;
-    my %args = (
-        len => 10,
-        admin => 0,
-        @_,
-    );
-
-    return undef if $self->is_admin && !$args{admin};
-
-    my $new_password = passgen( $args{len} );
-    $self->passwd( password => $new_password );
-
-    return $new_password;
-}
-
 sub render_mail_text {
     my $self = shift;
     my %args = (
@@ -435,13 +372,17 @@ sub gen_session {
     my $self = shift;
     my %args = (
         usi => undef,
+        login => undef,
         @_,
     );
+
+    my $login = $args{login};
 
     my $session_id = get_service('sessions')->add(
         user_id => $self->id,
         settings => {
             $args{usi} ? ( usi => $args{usi} ) : (),
+            $login ? ( account => { login => $login->get_login, type => $login->get_type } ) : (),
         },
     );
 
@@ -516,7 +457,9 @@ sub verify_email {
         return { msg => 'is not email' };
     }
 
-    my $login = $self->logins->id( $email, ['email'] );
+    # Scope the lookup to the current user, otherwise any authenticated
+    # user could probe/verify or trigger mail to another user's email login.
+    my $login = $self->logins->id( $email, ['email'], user_id => $self->id );
     unless ( $login ) {
         return { msg => 'email not found' };
     }
@@ -602,9 +545,17 @@ sub email_verify_code_check {
 
 sub delete_email {
     my $self = shift;
-    my $email = shift;
+    my %args = (
+        email => undef,
+        @_,
+    );
 
-    my $login = $self->logins->id( $email, ['email'] );
+    my $email = lc( $args{email} // '' );
+    return { msg => 'Email not found' } unless $email;
+
+    # Scope the lookup to the current user, otherwise any authenticated
+    # user could delete another user's email login by guessing its address.
+    my $login = $self->logins->id( $email, ['email'], user_id => $self->id );
     unless ( $login ) {
         return { msg => 'Email not found' };
     }
@@ -737,12 +688,13 @@ sub check_exists_logins {
     my $self = shift;
     my %args = (
         login => undef,
+        types => ['login','email','phone'],
         @_,
     );
 
     return undef unless $args{login};
 
-    if ( my $login = $self->logins->id( $args{login} ) ) {
+    if ( my $login = $self->logins->id( $args{login}, $args{types} ) ) {
         return scalar $login->get;
     }
 
@@ -1068,7 +1020,60 @@ sub promo {
 
 sub is_admin {
     my $self = shift;
-    return $self->get_gid;
+
+    my $group = $self->group;
+    return $group && $group->get_is_admin ? 1 : 0;
+}
+
+# Группа пользователя (users.gid). undef, если gid не задан/равен 0, либо
+# такой группы не существует (для обратной совместимости - как если бы
+# группа не была задана вовсе).
+sub group {
+    my $self = shift;
+
+    my $gid = $self->get_gid;
+    return undef unless $gid;
+
+    my $group = get_service('User::Groups', _id => $gid );
+    return ( $group && $group->get ) ? $group : undef;
+}
+
+# Группа аккаунта (accounts.settings.gid), которым выполнен вход в
+# текущем запросе (см. Core::User::auth и SHM.pm). Может ещё сильнее
+# сузить права, выданные группой пользователя, но не расширить их.
+sub account_group {
+    my $self = shift;
+
+    my $login = $self->{login} || return undef;
+    my $gid = $login->get_settings->{gid};
+    return undef unless $gid;
+
+    my $group = get_service('User::Groups', _id => $gid );
+    return ( $group && $group->get ) ? $group : undef;
+}
+
+# Итоговое решение по доступу к $uri методом $method.
+# Если группа пользователя не задана/не найдена - это НЕ снимает проверку
+# группы аккаунта: каждый уровень (пользователь, затем аккаунт) проверяется
+# независимо, отсутствие ограничения на одном уровне не отменяет проверку
+# другого (см. can_access ниже).
+sub can_access {
+    my $self = shift;
+    my %args = (
+        uri => undef,
+        method => undef,
+        @_,
+    );
+
+    if ( my $group = $self->group ) {
+        return 0 unless $group->check( %args );
+    }
+
+    if ( my $account_group = $self->account_group ) {
+        return 0 unless $account_group->check( %args );
+    }
+
+    return 1;
 }
 
 sub list_for_api {
@@ -1091,12 +1096,22 @@ sub list_for_api {
     }
 
     my @list = $self->SUPER::list_for_api( %args );
+    # get_phone() below issues extra SELECTs on the same connection, which
+    # would otherwise clobber FOUND_ROWS() before found_rows() is read.
+    $self->{_found_rows_cache} = $self->SUPER::found_rows();
 
     for ( @list ) {
         $_->{phone} = $self->id( $_->{user_id} )->get_phone if $_->{user_id};
     }
 
     return @list;
+}
+
+sub found_rows {
+    my $self = shift;
+    return exists $self->{_found_rows_cache}
+        ? delete( $self->{_found_rows_cache} )
+        : $self->SUPER::found_rows();
 }
 
 sub _list {
