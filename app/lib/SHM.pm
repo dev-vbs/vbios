@@ -21,6 +21,7 @@ use Core::Utils qw(
     encode_json
     print_header
     print_json
+    sha256_hex
 );
 
 use base qw(Exporter);
@@ -88,10 +89,14 @@ sub new {
         $user_id = $args->{user_id};
     } elsif ( $ENV{HTTP_AUTHORIZATION} ) {
         my $auth = $ENV{HTTP_AUTHORIZATION};
-        $auth =~s/^Basic\s+//;
-        $auth = decode_base64( $auth );
-        my ( $user, $password ) = split(/\:/, $auth);
-        ( $user_id, $login_obj ) = ext_user_auth( $user, $password );
+        if ( $auth =~ s/^Bearer\s+//i ) {
+            ( $user_id, $login_obj ) = ext_token_auth( trim( $auth ) );
+        } else {
+            $auth =~s/^Basic\s+//;
+            $auth = decode_base64( $auth );
+            my ( $user, $password ) = split(/\:/, $auth);
+            ( $user_id, $login_obj ) = ext_user_auth( $user, $password );
+        }
     } elsif ( $headers{HTTP_LOGIN} && $headers{HTTP_PASSWORD} ) {
         ( $user_id, $login_obj ) = ext_user_auth($headers{HTTP_LOGIN}, $headers{HTTP_PASSWORD});
     } elsif ( !$args->{skip_check_auth} ) {
@@ -135,11 +140,46 @@ sub ext_user_auth {
         login => $login,
         password => $password,
     );
+
+    my $report = get_service('report');
+    unless ( $report->is_success ) {
+        my ( $err_msg ) = $report->errors;
+        print_json( { status => 401, error => $err_msg } );
+        exit 0;
+    }
+
     unless ( $user ) {
         print_json( { status => 401, error => 'Incorrect login or password' } );
         exit 0;
     }
+
     return ( $user->id, $user->{login} );
+}
+
+sub ext_token_auth {
+    my $token = shift;
+
+    db_connect();
+
+    unless ( $token ) {
+        print_json( { status => 401, error => 'Incorrect token' } );
+        exit 0;
+    }
+
+    my $login_obj = get_service('User::Logins')->id( sha256_hex( $token ), ['token'] );
+
+    if ( !$login_obj ) {
+        print_json( { status => 401, error => 'Incorrect token' } );
+        exit 0;
+    } elsif ( $login_obj->is_expired ) {
+        print_json( { status => 401, error => 'Token expired' } );
+        exit 0;
+    } elsif ( $login_obj->is_ip_restricted ) {
+        print_json( { status => 401, error => 'Token restricted' } );
+        exit 0;
+    }
+
+    return ( $login_obj->get_user_id, $login_obj );
 }
 
 # Восстанавливаем accounts-логин, которым была создана сессия (см.
