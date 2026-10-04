@@ -840,7 +840,7 @@ state $routes //= {
     POST => {
         params => {
             service_id => { type => 'integer', required => 1, min => 1 },
-            children   => { type => 'object', required => 1 },
+            children   => { type => 'array', required => 1 },
         },
         controller => 'Service',
         method => 'children',
@@ -1962,7 +1962,7 @@ state $routes //= {
             register_if_not_exists => { type => 'boolean' },
             bind_to_profile  => { type => 'boolean' },
             bind_only_if_new => { type => 'boolean' },
-            session_id              => { type => 'integer', min => 1 },
+            session_id       => { type => 'string', min => 1 },
             # OIDC code flow
             code             => { type => 'string' },
             redirect_uri     => { type => 'string' },
@@ -2020,7 +2020,7 @@ state $routes //= {
             register_if_not_exists => { type => 'boolean' },
             bind_to_profile        => { type => 'boolean' },
             bind_only_if_new       => { type => 'boolean' },
-            session_id             => { type => 'integer', min => 1 },
+            session_id             => { type => 'string', min => 1 },
             ttl                    => { type => 'integer', min => 1 },
         },
         skip_check_auth => 1,
@@ -2064,7 +2064,7 @@ state $routes //= {
             register_if_not_exists => { type => 'boolean' },
             bind_to_profile        => { type => 'boolean' },
             bind_only_if_new       => { type => 'boolean' },
-            session_id             => { type => 'integer', min => 1 },
+            session_id             => { type => 'string', min => 1 },
             ttl                    => { type => 'integer', min => 1 },
         },
         skip_check_auth => 1,
@@ -2090,7 +2090,7 @@ state $routes //= {
             register_if_not_exists => { type => 'boolean' },
             bind_to_profile        => { type => 'boolean' },
             bind_only_if_new       => { type => 'boolean' },
-            session_id             => { type => 'integer', min => 1 },
+            session_id             => { type => 'string', min => 1 },
             # OIDC code flow
             code                   => { type => 'string' },
             redirect_uri           => { type => 'string' },
@@ -2517,6 +2517,14 @@ if ( my $p = $router->match( sprintf("%s:%s", $ENV{REQUEST_METHOD}, $uri )) ) {
             $err
         ));
         exit 0;
+    }
+
+    # Pin the session to the current client fingerprint (IP + User-Agent)
+    # whenever a route explicitly accepts `session_id` as a parameter (vs.
+    # the auth cookie/header), so a leaked session_id can be detected if
+    # replayed from a different client (see Core::Sessions::validate).
+    if ( $schema{session_id} && $args{session_id} ) {
+        get_service('sessions')->bind_fingerprint( session_id => $args{session_id} );
     }
 
     # Build safe_args: route-level defaults + only declared/validated input fields.
