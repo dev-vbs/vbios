@@ -22,6 +22,7 @@ use Core::Utils qw(
     uri_escape_utf8
     uri_unescape
     any
+    hmac_sha256_hex
 );
 
 sub max_server { shift->config->{server} || 'https://platform-api2.max.ru' }
@@ -187,6 +188,76 @@ sub message_text {
         return $cb->{callback_id} // '';
     }
     return '';
+}
+
+sub message_contact_phone {
+    my $self = shift;
+    my $msg = shift || $self->get_message || return undef;
+
+    my $attachments = $msg->{body}->{attachments} || [];
+    for my $attachment ( @$attachments ) {
+        next unless ( $attachment->{type} // '' ) eq 'contact';
+
+        my $payload = $attachment->{payload} || next;
+        unless ( $self->_verify_contact_hash( $payload ) ) {
+            logger->warning('MAX: contact hash verification failed, ignoring phone');
+            next;
+        }
+
+        my $vcf = $payload->{vcf_info} // next;
+        next unless $vcf =~ /^TEL[^:\r\n]*:([^\r\n]+)/m;
+
+        ( my $digits = $1 ) =~ s/\D+//g;
+        return $digits if length $digits;
+    }
+
+    return undef;
+}
+
+# https://dev.max.ru/docs-api/use-cases/sending-messages/keyboard#Кнопка%20request_contact)
+sub _verify_contact_hash {
+    my $self = shift;
+    my $payload = shift || return 0;
+
+    my $hash  = $payload->{hash} // return 0;
+    my $vcf   = $payload->{vcf_info} // return 0;
+    my $token = $self->token || return 0;
+
+    $vcf =~ s/\\r\\n/\r\n/g;
+
+    return lc( hmac_sha256_hex( $vcf, $token ) ) eq lc( $hash );
+}
+
+sub contact_phone { shift->{contact_phone} }
+
+sub save_contact_phone {
+    my $self = shift;
+    my $user = shift || return undef;
+    my $phone = shift // $self->contact_phone;
+
+    return undef unless $phone;
+
+    if ( my $login = $user->logins->id( $phone, ['phone'], user_id => $user->id ) ) {
+        $login->set_settings({ phone => { verified => 1 } });
+        return $login;
+    }
+
+    return $user->logins->add(
+        login    => $phone,
+        type     => 'phone',
+        settings => { phone => { verified => 1 } },
+    );
+}
+
+sub find_user_by_phone {
+    my $self = shift;
+    my $phone = shift // return undef;
+
+    ( my $digits = $phone ) =~ s/\D+//g;
+    return undef unless length $digits;
+
+    my $login = $self->user->logins->id( $digits, ['phone'] ) || return undef;
+    return $login->user;
 }
 
 sub start_args {
@@ -480,6 +551,8 @@ sub process_message {
         return {};
     }
 
+    $self->{contact_phone} = $self->message_contact_phone;
+
     my $user = $self->auth();
     my ( $cmd, @cmd_args ) = $self->cmd;
     $cmd ||= '/start';
@@ -493,6 +566,8 @@ sub process_message {
         $self->sendMessage( text => sprintf("You are blocked! (user_id: %s)", $user->id) );
         return {};
     }
+
+    $self->save_contact_phone( $user ) if $self->contact_phone;
 
     if ( $cmd eq '/start' && $cmd_args[0] ) {
         my %start_args;
@@ -533,9 +608,10 @@ sub sendMessage {
 sub shmRegister {
     my $self = shift;
     my %args = (
-        callback_data => undef,
+        callback_data => '/start',
         error         => undef,
         partner_id    => undef,
+        phone         => undef,
         settings      => {},
         get_smart_args(@_),
     );
@@ -551,10 +627,15 @@ sub shmRegister {
 
     my %start_args = $self->start_args;
     $args{partner_id} //= $start_args{pid};
+    $args{phone}      //= $self->contact_phone;
 
     my $max_user_id = $max_user->{user_id};
 
-    my $user = $self->user->reg(
+    # Если телефон уже привязан к чьему-то аккаунту в SHM — не создаём
+    # нового пользователя, а просто привязываем к найденному аккаунт MAX
+    my $user = $args{phone} ? $self->find_user_by_phone( $args{phone} ) : undef;
+
+    $user ||= $self->user->reg(
         login      => $max_user_id,
         login_type => 'max',
         full_name  => $max_user->{name} || '',
@@ -565,6 +646,9 @@ sub shmRegister {
     );
 
     if ( $user ) {
+        $user->logins->add( login => $max_user_id, type => 'max' )
+            unless $user->logins->id( $max_user_id, ['max'], user_id => $user->id );
+
         $self->auth();
         if ( %start_args ) {
             my %utm;
@@ -586,12 +670,17 @@ sub shmRegister {
                 },
             }
         );
-        $user->login->set_settings({
-            auth => {
-                date => now(),
-            },
-            %max_settings,
-        });
+
+        if ( my $max_login = $self->find_user_by_max( $max_user ) ) {
+            $max_login->set_settings({
+                auth => {
+                    date => now(),
+                },
+                %max_settings,
+            });
+        }
+
+        $self->save_contact_phone( $user, $args{phone} ) if $args{phone};
 
         return $self->exec_template( cmd => $args{callback_data} );
     }

@@ -63,6 +63,7 @@ our @EXPORT_OK = qw(
     blessed
     get_random_value
     random_bytes
+    random_string
     random_base64url
     jwt_decode
     to_query_string
@@ -71,6 +72,7 @@ our @EXPORT_OK = qw(
     print_header
     print_json
     get_user_ip
+    get_user_agent
     is_ip_allowed
     trusted_ips
 
@@ -639,13 +641,27 @@ sub ipv4_aton {
     return ($o[0]<<24) + ($o[1]<<16) + ($o[2]<<8) + $o[3];
 }
 
+# $nets may be an arrayref of IP/CIDR entries, or a string with entries
+# separated by commas, semicolons and/or whitespace (including newlines)
+sub _normalize_nets {
+    my $nets = shift;
+    return () unless defined $nets;
+
+    my @list = ref $nets eq 'ARRAY' ? @$nets : split /[\s,;]+/, $nets;
+
+    return grep { defined && length } @list;
+}
+
 sub is_ip_allowed {
     my ($ip, $nets) = @_;
     return 0 unless $ip;
 
+    my @nets = _normalize_nets($nets);
+    return 0 unless @nets;
+
     if (is_ipv4($ip)) {
         my $ip_int = ipv4_aton($ip);
-        for my $cidr (@$nets) {
+        for my $cidr (@nets) {
             next unless $cidr =~ /^[0-9.]+/;
             my ($net, $masklen) = split '/', $cidr;
             $masklen //= 32;
@@ -659,7 +675,7 @@ sub is_ip_allowed {
     elsif (is_ipv6($ip)) {
         require Socket;
         my $ip_bin = Socket::inet_pton(Socket::AF_INET6(), $ip);
-        for my $cidr (@$nets) {
+        for my $cidr (@nets) {
             next unless $cidr =~ /:/;
             my ($net, $masklen) = split '/', $cidr;
             $masklen //= 128;
@@ -783,6 +799,26 @@ sub get_random_value {
     }
 }
 
+# Cryptographically secure random string generator (session ids, bearer
+# tokens, etc). Draws uniformly from $chars (default: a-z A-Z 0-9) using the
+# Crypt::PRNG CSPRNG (random_bytes) with rejection sampling to avoid modulo
+# bias, unlike get_random_value()/rand() which are not suitable for secrets.
+sub random_string {
+    my $length = shift // 32;
+    my $chars = shift || [ 'a' .. 'z', 'A' .. 'Z', '0' .. '9' ];
+
+    my $n = scalar @$chars;
+    my $str = '';
+    while ( length($str) < $length ) {
+        for my $byte ( unpack( 'C*', random_bytes( $length * 2 ) ) ) {
+            next if $byte >= int( 256 / $n ) * $n;  # rejection sampling — uniform distribution
+            $str .= $chars->[ $byte % $n ];
+            last if length($str) == $length;
+        }
+    }
+    return $str;
+}
+
 sub random_base64url {
     my $len = shift;
     $len = 32 unless defined $len;
@@ -861,6 +897,10 @@ sub print_json {
 
 sub get_user_ip {
     return $ENV{HTTP_X_REAL_IP} || $ENV{REMOTE_ADDR};
+}
+
+sub get_user_agent {
+    return $ENV{HTTP_USER_AGENT} // '';
 }
 
 sub format_time_diff {
