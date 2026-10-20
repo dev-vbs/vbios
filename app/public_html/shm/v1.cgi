@@ -123,7 +123,7 @@ state $routes //= {
         params => {
             login => { type => 'string', required => 1, min_length => 1, max_length => 64 },
             login_type => { type => 'string', required => 0, enum => ['login','email'] },
-            password => { type => 'string', required => 1, min_length => 10, max_length => 128 },
+            password => { type => 'string', required => 1, min_length => 6, max_length => 128 },
             full_name => { type => 'string', required => 0, min_length => 1, max_length => 64 },
             phone => { type => 'string', required => 0, min_length => 1, max_length => 16 },
             partner_id => { type => 'integer', min => 2 },
@@ -1685,6 +1685,30 @@ state $routes //= {
         },
         controller => 'Analytics',
         method => 'api_report',
+    },
+},
+'/admin/topology' => {
+    swagger => { tags => 'Топология' },
+    GET => {
+        params => {
+            event   => { type => 'string', pattern => '^\w+$' },
+            refresh => { type => 'boolean' },
+        },
+        controller => 'Topology',
+        method => 'api_graph',
+        args => {
+            format => 'json',
+        },
+        swagger => { summary => 'Граф связей: услуги, события, шаблоны, серверы' },
+    },
+},
+'/admin/topology/cache/clear' => {
+    swagger => { tags => 'Топология' },
+    POST => {
+        params => {},
+        controller => 'Topology',
+        method => 'clear_cache',
+        swagger => { summary => 'Очистить кеш топологии в Redis' },
     },
 },
 '/admin/analytics/cache/clear' => {
