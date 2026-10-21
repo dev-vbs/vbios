@@ -1,0 +1,301 @@
+package Core::Ticket;
+
+use v5.14;
+use utf8;
+use parent 'Core::Base';
+use Core::Base;
+use Core::Utils qw( decode_json encode_json now );
+use MIME::Base64 qw( decode_base64 );
+
+sub table { return 'tickets' }
+
+sub structure {
+    return {
+        ticket_id => { type => 'number', key => 1 },
+        user_id => { type => 'number', auto_fill => 1, key_mul => 1 },
+        subject => { type => 'text' },
+        status => { type => 'text' },
+        priority => { type => 'text' },
+        ticket_type => { type => 'text' },
+        user_service_id => { type => 'number', default => undef },
+        created => { type => 'text' },
+        updated => { type => 'text' },
+        closed_at => { type => 'text', default => undef },
+        telegram_chat_id => { type => 'text', hide_for_user => 1 },
+        telegram_thread_id => { type => 'number', hide_for_user => 1 },
+        telegram_error => { type => 'text', hide_for_user => 1 },
+    };
+}
+
+sub _user {
+    my $self = shift;
+    my $user = $self->user->authenticated;
+    unless ( $user && $user->id ) {
+        report->status(401);
+        report->add_error('Authentication required');
+        return undef;
+    }
+    return $user;
+}
+
+sub _ticket_config {
+    my $self = shift;
+    my $config = cfg('ticket') || {};
+    return $config if $config->{id};
+    return {};
+}
+
+sub _telegram {
+    my $self = shift;
+    my $config = $self->_ticket_config || return undef;
+    return undef unless defined $config->{id} && $config->{id} =~ /^-?\d+$/;
+
+    my $tg = get_service('Transport::Telegram') || return undef;
+    $tg->profile( $config->{telegram_profile} || 'telegram_bot' );
+    $tg->{chat_id} = $config->{id};
+    return $tg;
+}
+
+sub _telegram_result {
+    my ( $self, $response ) = @_;
+    return undef unless $response;
+    return $response->{result} if ref $response eq 'HASH' && exists $response->{result};
+    return undef unless eval { $response->can('decoded_content') };
+    my $payload = decode_json( $response->decoded_content ) || {};
+    return $payload->{ok} ? $payload->{result} : undef;
+}
+
+sub _is_valid_choice {
+    my ( $self, $value, $allowed, $default ) = @_;
+    return $default unless defined $value;
+    return $allowed->{$value} ? $value : $default;
+}
+
+sub _tg_html {
+    my ( $self, $text ) = @_;
+    $text //= '';
+    $text =~ s/&/&amp;/g;
+    $text =~ s/</&lt;/g;
+    $text =~ s/>/&gt;/g;
+    return $text;
+}
+sub _message_data {
+    my ( $self, $ticket_id ) = @_;
+    my $messages = $self->query(
+        'SELECT message_id, ticket_id, user_id, is_admin, message, created FROM ticket_messages WHERE ticket_id=? ORDER BY message_id ASC',
+        $ticket_id,
+    );
+    for my $message ( @{ $messages || [] } ) {
+        my $media = $self->query(
+            'SELECT m.id, m.name, m.mime_type, m.size, m.created FROM ticket_message_media mm JOIN ticket_media m ON m.id=mm.media_id WHERE mm.message_id=? ORDER BY m.id ASC',
+            $message->{message_id},
+        );
+        $message->{media} = $media || [];
+    }
+    return $messages || [];
+}
+
+sub _ticket_data {
+    my ( $self, $ticket ) = @_;
+    return undef unless $ticket;
+    my %data = %$ticket;
+    $data{messages} = $self->_message_data( $data{ticket_id} );
+    return \%data;
+}
+
+sub api_list {
+    my $self = shift;
+    my %args = @_;
+    my $user = $self->_user || return ();
+    my $limit = int($args{limit} || 100);
+    $limit = 100 if $limit < 1 || $limit > 100;
+
+    my @bind = ($user->id);
+    my $where = 'WHERE user_id=?';
+    if ( $args{status} && $args{status} =~ /^(?:open|in_progress|waiting|closed|archived)$/ ) {
+        $where .= ' AND status=?';
+        push @bind, $args{status};
+    }
+    my $tickets = $self->query("SELECT * FROM tickets $where ORDER BY updated DESC, ticket_id DESC LIMIT $limit", @bind);
+    return map { $self->_ticket_data($_) } @{ $tickets || [] };
+}
+
+sub api_get {
+    my $self = shift;
+    my %args = @_;
+    my $user = $self->_user || return ();
+    my ($ticket) = $self->query('SELECT * FROM tickets WHERE ticket_id=? AND user_id=? LIMIT 1', $args{ticket_id}, $user->id);
+    unless ($ticket) {
+        report->status(404);
+        report->add_error('Ticket not found');
+        return ();
+    }
+    return ($self->_ticket_data($ticket));
+}
+
+sub _add_message {
+    my ( $self, %args ) = @_;
+    my $id = $self->_add(
+        table => 'ticket_messages',
+        ticket_id => $args{ticket_id},
+        user_id => $args{user_id},
+        is_admin => $args{is_admin} ? 1 : 0,
+        message => $args{message},
+    );
+    for my $media_id ( @{ $args{media_ids} || [] } ) {
+        $self->_add(table => 'ticket_message_media', message_id => $id, media_id => $media_id);
+    }
+    return $id;
+}
+
+sub _send_to_telegram {
+    my ( $self, $ticket, $text, $media_ids ) = @_;
+    my $tg = $self->_telegram || return 0;
+    my %data = ( text => $text, message_thread_id => $ticket->{telegram_thread_id} );
+    my $response = $tg->sendMessage(%data);
+    my $sent = $self->_telegram_result($response);
+
+    for my $media_id ( @{ $media_ids || [] } ) {
+        my ($media) = $self->query('SELECT name, mime_type, data FROM ticket_media WHERE id=?', $media_id);
+        next unless $media;
+        $tg->uploadDocument($media->{data}, filename => $media->{name}, message_thread_id => $ticket->{telegram_thread_id});
+    }
+    return $sent ? 1 : 0;
+}
+
+sub _create_topic {
+    my ( $self, $ticket ) = @_;
+    my $tg = $self->_telegram || return 0;
+    my $result = $self->_telegram_result($tg->http('createForumTopic', data => {
+        name => sprintf('#%s %s', $ticket->{ticket_id}, substr($ticket->{subject}, 0, 80)),
+    }));
+    unless ($result && $result->{message_thread_id}) {
+        $self->_set(table => 'tickets', where => { ticket_id => $ticket->{ticket_id} }, telegram_error => 'Unable to create Telegram forum topic');
+        logger->warning('Ticket ' . $ticket->{ticket_id} . ': Telegram forum topic was not created');
+        return 0;
+    }
+    my $config = $self->_ticket_config;
+    $self->_set(
+        table => 'tickets', where => { ticket_id => $ticket->{ticket_id} },
+        telegram_chat_id => $config->{id}, telegram_thread_id => $result->{message_thread_id}, telegram_error => undef,
+    );
+    $ticket->{telegram_thread_id} = $result->{message_thread_id};
+    return 1;
+}
+
+sub api_create {
+    my $self = shift;
+    my %args = @_;
+    my $user = $self->_user || return undef;
+    my $subject = $args{subject} // '';
+    my $message = $args{message} // '';
+    $subject =~ s/^\s+|\s+$//g;
+    $message =~ s/^\s+|\s+$//g;
+    unless (length($subject) && length($message)) {
+        report->add_error('Subject and message are required');
+        return undef;
+    }
+    my $id = $self->_add(
+        user_id => $user->id, subject => substr($subject, 0, 160), status => 'open',
+        priority => $self->_is_valid_choice($args{priority}, { map { $_ => 1 } qw(low normal high urgent) }, 'normal'),
+        ticket_type => $self->_is_valid_choice($args{ticket_type}, { map { $_ => 1 } qw(service payment other) }, 'other'),
+        ( $args{user_service_id} ? (user_service_id => $args{user_service_id}) : () ),
+    );
+    return undef unless $id;
+    my ($ticket) = $self->query('SELECT * FROM tickets WHERE ticket_id=?', $id);
+    $self->_add_message(ticket_id => $id, user_id => $user->id, message => $message);
+    if ($self->_create_topic($ticket)) {
+        $self->_send_to_telegram($ticket, "<b>Новое обращение #$id</b>\nПользователь: " . $user->id . "\nТип: " . $ticket->{ticket_type} . "\nПриоритет: " . $ticket->{priority} . "\n\n" . $self->_tg_html($message), []);
+    }
+    ($ticket) = $self->query('SELECT * FROM tickets WHERE ticket_id=?', $id);
+    return $self->_ticket_data($ticket);
+}
+
+sub api_send {
+    my $self = shift;
+    my %args = @_;
+    my $user = $self->_user || return undef;
+    my $ticket = $self->get || return undef;
+    if ($ticket->{status} =~ /^(?:closed|archived)$/) {
+        report->status(409);
+        report->add_error('Ticket is closed');
+        return undef;
+    }
+    my $message = $args{message} // '';
+    $message =~ s/^\s+|\s+$//g;
+    unless (length($message)) { report->add_error('Message is required'); return undef; }
+    my @media = grep { /^\d+$/ } @{ $args{media_ids} || [] };
+    if (@media) {
+        my $found = $self->query('SELECT id FROM ticket_media WHERE user_id=? AND id IN (' . join(',', ('?') x @media) . ')', $user->id, @media);
+        @media = map { $_->{id} } @$found;
+    }
+    my $message_id = $self->_add_message(ticket_id => $ticket->{ticket_id}, user_id => $user->id, message => $message, media_ids => \@media);
+    $self->_set(table => 'tickets', where => {ticket_id => $ticket->{ticket_id}}, status => 'open', updated => now);
+    $self->_send_to_telegram($ticket, "<b>Пользователь #" . $user->id . ":</b>\n" . $self->_tg_html($message), \@media) if $ticket->{telegram_thread_id};
+    my ($saved) = $self->query('SELECT message_id, ticket_id, user_id, is_admin, message, created FROM ticket_messages WHERE message_id=?', $message_id);
+    $saved->{media} = $self->query('SELECT m.id, m.name, m.mime_type, m.size, m.created FROM ticket_message_media mm JOIN ticket_media m ON m.id=mm.media_id WHERE mm.message_id=?', $message_id) || [];
+    return $saved;
+}
+
+sub api_close {
+    my $self = shift;
+    my $ticket = $self->get || return undef;
+    return $ticket if $ticket->{status} eq 'closed';
+    $self->_set(table => 'tickets', where => {ticket_id => $ticket->{ticket_id}}, status => 'closed', closed_at => now, updated => now);
+    if ($ticket->{telegram_thread_id}) {
+        my $tg = $self->_telegram;
+        $tg->http('closeForumTopic', data => { message_thread_id => $ticket->{telegram_thread_id} }) if $tg;
+    }
+    my ($saved) = $self->query('SELECT * FROM tickets WHERE ticket_id=?', $ticket->{ticket_id});
+    return $self->_ticket_data($saved);
+}
+
+sub api_upload_media {
+    my $self = shift;
+    my %args = @_;
+    my $user = $self->_user || return undef;
+    my $data = eval { decode_base64($args{data} // '') };
+    unless (defined($data) && length($data) && length($data) <= 5 * 1024 * 1024) {
+        report->add_error('Invalid attachment data'); return undef;
+    }
+    my $name = $args{name} // 'attachment';
+    $name =~ s/[^\w.() -]+/_/g;
+    my $id = $self->_add(table => 'ticket_media', user_id => $user->id, name => substr($name,0,255), mime_type => substr($args{mime_type} // 'application/octet-stream',0,100), size => length($data), data => $data);
+    my ($media) = $self->query('SELECT id, name, mime_type, size, created FROM ticket_media WHERE id=?', $id);
+    return $media;
+}
+
+sub api_download_media {
+    my $self = shift;
+    my %args = @_;
+    my $user = $self->_user || return '';
+    my ($media) = $self->query('SELECT data FROM ticket_media WHERE id=? AND user_id=?', $args{id}, $user->id);
+    unless ($media) { report->status(404); report->add_error('Attachment not found'); return ''; }
+    return $media->{data};
+}
+
+sub process_telegram_message {
+    my $self = shift;
+    my %args = @_;
+    my $message = $args{message} || {};
+    my $config = $self->_ticket_config || return 0;
+    return 0 unless defined $message->{chat}->{id} && "$message->{chat}->{id}" eq "$config->{id}";
+    return 0 unless $message->{message_thread_id} && $message->{from}->{id};
+    return 0 if $message->{from}->{is_bot};
+    my ($ticket) = $self->query('SELECT * FROM tickets WHERE telegram_chat_id=? AND telegram_thread_id=? LIMIT 1', $config->{id}, $message->{message_thread_id});
+    return 0 unless $ticket;
+    return 1 if $ticket->{status} =~ /^(?:closed|archived)$/;
+
+    my $tg = $self->_telegram || $args{telegram};
+    my $member = $self->_telegram_result($tg->http('getChatMember', data => { user_id => $message->{from}->{id} }));
+    return 1 unless $member && ($member->{status} // '') =~ /^(?:administrator|creator|owner)$/;
+    my $text = $message->{text} // $message->{caption} // '';
+    return 1 unless length $text;
+    $self->_add_message(ticket_id => $ticket->{ticket_id}, user_id => 0, is_admin => 1, message => $text);
+    $self->_set(table => 'tickets', where => {ticket_id => $ticket->{ticket_id}}, status => 'waiting', updated => now);
+    return 1;
+}
+
+1;
+
+
