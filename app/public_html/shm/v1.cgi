@@ -133,6 +133,18 @@ state $routes //= {
         swagger => { summary => 'Регистрация пользователя' },
     },
 },
+'/user/profile' => {
+    swagger => { tags => 'Пользователи' },
+    POST => {
+        controller => 'User',
+        method => 'api_update_profile',
+        params => {
+            full_name => { type => 'string', required => 0, max_length => 64 },
+            phone => { type => 'string', required => 0, max_length => 24 },
+        },
+        swagger => { summary => 'Изменение профиля текущего пользователя' },
+    },
+},
 '/user/referrals' => {
     swagger => { tags => 'Пользователи' },
     GET => {
@@ -428,7 +440,51 @@ state $routes //= {
         swagger => { summary => 'Удаление email пользователя' },
     },
 },
-'/user/service' => {
+'/user/ticket' => {
+    swagger => { tags => 'Поддержка' },
+    GET => {
+        controller => 'Ticket', method => 'api_list',
+        params => { status => { type => 'string' }, limit => { type => 'integer', min => 1, max => 100 }, offset => { type => 'integer', min => 0 } },
+        swagger => { summary => 'Список обращений текущего пользователя' },
+    },
+    PUT => {
+        controller => 'Ticket', method => 'api_create',
+        params => {
+            subject => { type => 'string', required => 1, min_length => 1, max_length => 160 },
+            message => { type => 'string', required => 1, min_length => 1, max_length => 2000 },
+            priority => { type => 'string', enum => ['low','normal','high','urgent'] },
+            ticket_type => { type => 'string', enum => ['service','payment','other'] },
+            user_service_id => { type => 'integer', min => 1 },
+        },
+        swagger => { summary => 'Создать обращение и тему в Telegram' },
+    },
+},
+'/user/ticket/media' => {
+    swagger => { tags => 'Поддержка' },
+    PUT => {
+        controller => 'Ticket', method => 'api_upload_media',
+        params => { name => { type => 'string', required => 1, max_length => 255 }, data => { type => 'string', required => 1 }, mime_type => { type => 'string', max_length => 100 } },
+        swagger => { summary => 'Загрузить вложение обращения' },
+    },
+},
+'/user/ticket/media/*' => {
+    splat_to => 'id',
+    GET => {
+        controller => 'Ticket', method => 'api_download_media',
+        params => {}, args => { format => 'other' },
+        swagger => { summary => 'Скачать вложение обращения' },
+    },
+},
+'/user/ticket/*' => {
+    splat_to => 'ticket_id',
+    GET => { controller => 'Ticket', method => 'api_get', params => {}, swagger => { summary => 'Детали обращения и переписка' } },
+    POST => {
+        controller => 'Ticket', method => 'api_send',
+        params => { message => { type => 'string', required => 1, min_length => 1, max_length => 2000 }, media_ids => { type => 'array' } },
+        swagger => { summary => 'Отправить сообщение в обращение' },
+    },
+    DELETE => { controller => 'Ticket', method => 'api_close', params => {}, swagger => { summary => 'Закрыть обращение и Telegram topic' } },
+},'/user/service' => {
     swagger => { tags => 'Услуги пользователей' },
     GET => {
         controller => 'USObject',
@@ -2941,3 +2997,4 @@ sub _log_api_call {
 }
 
 # exit 0;
+
