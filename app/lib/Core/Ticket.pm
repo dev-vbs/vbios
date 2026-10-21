@@ -467,7 +467,19 @@ sub _telegram_message_files {
 sub _download_telegram_file {
     my ( $self, $tg, $file_id ) = @_;
     return undef unless $file_id;
-    my $file = $self->_telegram_result($tg->http('getFile', data => { file_id => $file_id }));
+
+    # Incoming updates use a webhook transport. Calling $tg->http here would
+    # produce a direct webhook response instead of making the getFile request.
+    # Use the HTTP transport directly so attachments are actually fetched.
+    my $metadata_response = $tg->http_transport->http(
+        method => 'post',
+        url => sprintf('%s/bot%s/getFile', $tg->telegram_server, $tg->token),
+        content_type => 'application/json; charset=utf-8',
+        content => encode_json({ file_id => $file_id }),
+    );
+    return undef unless $metadata_response && $metadata_response->is_success;
+    my $metadata = decode_json($metadata_response->decoded_content) || {};
+    my $file = $metadata->{ok} ? $metadata->{result} : undef;
     return undef unless $file && $file->{file_path};
 
     my $path = $file->{file_path};
@@ -558,3 +570,6 @@ sub process_telegram_message {
 }
 
 1;
+
+
+
