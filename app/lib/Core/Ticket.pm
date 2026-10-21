@@ -102,6 +102,18 @@ sub _is_valid_choice {
     return $allowed->{$value} ? $value : $default;
 }
 
+sub _ticket_user_label {
+    my ( $self, $user ) = @_;
+    my $data = $user->get || {};
+    my $label = $data->{full_name} // '';
+    $label =~ s/^\s+|\s+$//g;
+    return $label if length $label;
+
+    $label = $data->{login} // $user->auth_login // '';
+    $label =~ s/^\s+|\s+$//g;
+    return $label if length $label;
+    return 'Пользователь ' . ($user->id // '');
+}
 sub _tg_html {
     my ( $self, $text ) = @_;
     $text //= '';
@@ -248,7 +260,8 @@ sub api_create {
         report->add_error($self->_telegram_error);
         return undef;
     }
-    unless ($self->_send_to_telegram($ticket, "<b>Новое обращение #$id</b>\nПользователь: " . $user->id . "\nТип: " . $ticket->{ticket_type} . "\nПриоритет: " . $ticket->{priority} . "\n\n" . $self->_tg_html($message), [])) {
+    my $user_label = $self->_tg_html($self->_ticket_user_label($user));
+    unless ($self->_send_to_telegram($ticket, "<b>Новое обращение #$id</b>\nПользователь: " . $user_label . "\nТип: " . $ticket->{ticket_type} . "\nПриоритет: " . $ticket->{priority} . "\n\n" . $self->_tg_html($message), [])) {
         report->status(502);
         report->add_error($self->_telegram_error);
         return undef;
@@ -294,7 +307,20 @@ sub api_close {
     $self->_set(table => 'tickets', where => {ticket_id => $ticket->{ticket_id}}, status => 'closed', closed_at => now, updated => now);
     if ($ticket->{telegram_thread_id}) {
         my $tg = $self->_telegram;
-        $tg->http('closeForumTopic', data => { message_thread_id => $ticket->{telegram_thread_id} }) if $tg;
+        if ($tg) {
+            my $response = $tg->http('deleteForumTopic', data => {
+                message_thread_id => $ticket->{telegram_thread_id},
+            });
+            unless ($self->_telegram_result($response)) {
+                my $error = $self->_telegram_error($response);
+                $self->_set(
+                    table => 'tickets',
+                    where => { ticket_id => $ticket->{ticket_id} },
+                    telegram_error => $error,
+                );
+                logger->warning('Ticket ' . $ticket->{ticket_id} . ': failed to delete Telegram topic: ' . $error);
+            }
+        }
     }
     my ($saved) = $self->query('SELECT * FROM tickets WHERE ticket_id=?', $ticket->{ticket_id});
     return $self->_ticket_data($saved);
@@ -347,3 +373,6 @@ sub process_telegram_message {
 }
 
 1;
+
+
+
