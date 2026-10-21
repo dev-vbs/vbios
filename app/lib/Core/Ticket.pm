@@ -248,14 +248,27 @@ sub _send_to_telegram {
     my %data = ( text => $text, message_thread_id => $ticket->{telegram_thread_id} );
     my $response = $tg->sendMessage(%data);
     my $sent = $self->_telegram_result($response);
-    $self->{ticket_telegram_error} = $self->_telegram_error($response) unless $sent;
+    unless ($sent) {
+        $self->{ticket_telegram_error} = $self->_telegram_error($response);
+        return 0;
+    }
 
     for my $media_id ( @{ $media_ids || [] } ) {
         my ($media) = $self->query('SELECT name, mime_type, data FROM ticket_media WHERE id=?', $media_id);
         next unless $media;
-        $tg->uploadDocument($media->{data}, filename => $media->{name}, message_thread_id => $ticket->{telegram_thread_id});
+        my $media_response = $tg->uploadMedia(
+            $media->{data},
+            filename => $media->{name},
+            mime_type => $media->{mime_type},
+            message_thread_id => $ticket->{telegram_thread_id},
+        );
+        unless ($self->_telegram_result($media_response)) {
+            $self->{ticket_telegram_error} = $self->_telegram_error($media_response);
+            logger->warning('Ticket ' . $ticket->{ticket_id} . ': failed to send Telegram attachment: ' . $self->{ticket_telegram_error});
+            return 0;
+        }
     }
-    return $sent ? 1 : 0;
+    return 1;
 }
 
 sub _create_topic {
