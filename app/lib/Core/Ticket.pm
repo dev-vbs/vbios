@@ -133,6 +133,45 @@ sub _tg_html {
     $text =~ s/>/&gt;/g;
     return $text;
 }
+
+sub _ticket_priority_label {
+    my ( $self, $priority ) = @_;
+    return {
+        low    => 'Низкий',
+        normal => 'Обычный',
+        high   => 'Высокий',
+        urgent => 'Срочный',
+    }->{ $priority // '' } || 'Обычный';
+}
+
+sub _ticket_type_label {
+    my ( $self, $type ) = @_;
+    return {
+        service => 'Услуга',
+        payment => 'Оплата',
+        other   => 'Другое',
+    }->{ $type // '' } || 'Другое';
+}
+
+sub _ticket_service_label {
+    my ( $self, $ticket ) = @_;
+    return undef unless $ticket->{user_service_id};
+
+    # Read the display name only from a service owned by this ticket's user.
+    # This prevents an arbitrary service ID in a request from exposing another
+    # customer's service name.
+    my ($service) = $self->query(
+        'SELECT us.user_service_id, s.name '
+        . 'FROM user_services us INNER JOIN services s ON s.service_id=us.service_id '
+        . 'WHERE us.user_service_id=? AND us.user_id=? LIMIT 1',
+        $ticket->{user_service_id}, $ticket->{user_id},
+    );
+
+    return 'Услуга #' . $ticket->{user_service_id} unless $service;
+    my $name = $service->{name} // '';
+    $name =~ s/^\s+|\s+$//g;
+    return length($name) ? $name . ' (#' . $service->{user_service_id} . ')' : 'Услуга #' . $ticket->{user_service_id};
+}
 sub _message_data {
     my ( $self, $ticket_id ) = @_;
     my $messages = $self->query(
@@ -153,6 +192,7 @@ sub _ticket_data {
     my ( $self, $ticket ) = @_;
     return undef unless $ticket;
     my %data = %$ticket;
+    $data{service_name} = $self->_ticket_service_label($ticket) if $ticket->{user_service_id};
     $data{messages} = $self->_message_data( $data{ticket_id} );
     return \%data;
 }
@@ -272,7 +312,15 @@ sub api_create {
         return undef;
     }
     my $user_label = $self->_ticket_user_reference($user);
-    unless ($self->_send_to_telegram($ticket, "<b>Новое обращение #$id</b>\nПользователь: " . $user_label . "\nТип: " . $ticket->{ticket_type} . "\nПриоритет: " . $ticket->{priority} . "\n\n" . $self->_tg_html($message), [])) {
+    my $ticket_type = $self->_ticket_type_label($ticket->{ticket_type});
+    my $priority = $self->_ticket_priority_label($ticket->{priority});
+    my $service = $self->_ticket_service_label($ticket);
+    my $details = "<b>Новое обращение #$id</b>\nПользователь: " . $user_label
+        . "\nТип: " . $self->_tg_html($ticket_type)
+        . "\nПриоритет: " . $self->_tg_html($priority);
+    $details .= "\nУслуга: " . $self->_tg_html($service) if defined $service;
+    $details .= "\n\n" . $self->_tg_html($message);
+    unless ($self->_send_to_telegram($ticket, $details, [])) {
         report->status(502);
         report->add_error($self->_telegram_error);
         return undef;
