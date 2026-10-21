@@ -40,19 +40,50 @@ sub _user {
 
 sub _ticket_config {
     my $self = shift;
-    my $config = cfg('ticket') || {};
-    return $config if $config->{id};
-    return {};
+    my $config = { %{ cfg('ticket') || {} } };
+
+    # Environment values are intended for Docker deployment. Database config
+    # remains supported, so existing SHM installations keep working.
+    $config->{id} = $ENV{TICKET_TELEGRAM_CHAT_ID}
+        unless defined $config->{id} && length $config->{id};
+    $config->{telegram_profile} = $ENV{TICKET_TELEGRAM_PROFILE}
+        unless defined $config->{telegram_profile} && length $config->{telegram_profile};
+    $config->{token} = $ENV{TICKET_TELEGRAM_BOT_TOKEN}
+        unless defined $config->{token} && length $config->{token};
+    return $config;
+}
+
+sub _telegram_error {
+    my ( $self, $response ) = @_;
+    return $self->{ticket_telegram_error} if $self->{ticket_telegram_error};
+    return 'Telegram API did not return a response' unless $response;
+    return $response->{description} || 'Telegram API request failed' if ref $response eq 'HASH';
+    return 'Telegram API request failed' unless eval { $response->can('decoded_content') };
+    my $payload = decode_json( $response->decoded_content ) || {};
+    return $payload->{description} || $response->status_line || 'Telegram API request failed';
 }
 
 sub _telegram {
     my $self = shift;
-    my $config = $self->_ticket_config || return undef;
-    return undef unless defined $config->{id} && $config->{id} =~ /^-?\d+$/;
+    delete $self->{ticket_telegram_error};
+    my $config = $self->_ticket_config;
+    unless (defined $config->{id} && $config->{id} =~ /^-?\d+$/) {
+        $self->{ticket_telegram_error} = 'Ticket Telegram chat ID is not configured';
+        return undef;
+    }
 
-    my $tg = get_service('Transport::Telegram') || return undef;
+    my $tg = get_service('Transport::Telegram');
+    unless ($tg) {
+        $self->{ticket_telegram_error} = 'Telegram transport is unavailable';
+        return undef;
+    }
     $tg->profile( $config->{telegram_profile} || 'telegram_bot' );
+    $tg->{token} = $config->{token} if $config->{token};
     $tg->{chat_id} = $config->{id};
+    unless ($tg->token) {
+        $self->{ticket_telegram_error} = 'Telegram bot token is not configured';
+        return undef;
+    }
     return $tg;
 }
 
@@ -154,6 +185,7 @@ sub _send_to_telegram {
     my %data = ( text => $text, message_thread_id => $ticket->{telegram_thread_id} );
     my $response = $tg->sendMessage(%data);
     my $sent = $self->_telegram_result($response);
+    $self->{ticket_telegram_error} = $self->_telegram_error($response) unless $sent;
 
     for my $media_id ( @{ $media_ids || [] } ) {
         my ($media) = $self->query('SELECT name, mime_type, data FROM ticket_media WHERE id=?', $media_id);
@@ -166,12 +198,14 @@ sub _send_to_telegram {
 sub _create_topic {
     my ( $self, $ticket ) = @_;
     my $tg = $self->_telegram || return 0;
-    my $result = $self->_telegram_result($tg->http('createForumTopic', data => {
+    my $response = $tg->http('createForumTopic', data => {
         name => sprintf('#%s %s', $ticket->{ticket_id}, substr($ticket->{subject}, 0, 80)),
-    }));
+    });
+    my $result = $self->_telegram_result($response);
     unless ($result && $result->{message_thread_id}) {
-        $self->_set(table => 'tickets', where => { ticket_id => $ticket->{ticket_id} }, telegram_error => 'Unable to create Telegram forum topic');
-        logger->warning('Ticket ' . $ticket->{ticket_id} . ': Telegram forum topic was not created');
+        my $error = $self->_telegram_error($response);
+        $self->_set(table => 'tickets', where => { ticket_id => $ticket->{ticket_id} }, telegram_error => $error);
+        logger->warning('Ticket ' . $ticket->{ticket_id} . ': ' . $error);
         return 0;
     }
     my $config = $self->_ticket_config;
@@ -187,6 +221,11 @@ sub api_create {
     my $self = shift;
     my %args = @_;
     my $user = $self->_user || return undef;
+    unless ($self->_telegram) {
+        report->status(503);
+        report->add_error($self->_telegram_error);
+        return undef;
+    }
     my $subject = $args{subject} // '';
     my $message = $args{message} // '';
     $subject =~ s/^\s+|\s+$//g;
@@ -204,8 +243,15 @@ sub api_create {
     return undef unless $id;
     my ($ticket) = $self->query('SELECT * FROM tickets WHERE ticket_id=?', $id);
     $self->_add_message(ticket_id => $id, user_id => $user->id, message => $message);
-    if ($self->_create_topic($ticket)) {
-        $self->_send_to_telegram($ticket, "<b>Новое обращение #$id</b>\nПользователь: " . $user->id . "\nТип: " . $ticket->{ticket_type} . "\nПриоритет: " . $ticket->{priority} . "\n\n" . $self->_tg_html($message), []);
+    unless ($self->_create_topic($ticket)) {
+        report->status(502);
+        report->add_error($self->_telegram_error);
+        return undef;
+    }
+    unless ($self->_send_to_telegram($ticket, "<b>Новое обращение #$id</b>\nПользователь: " . $user->id . "\nТип: " . $ticket->{ticket_type} . "\nПриоритет: " . $ticket->{priority} . "\n\n" . $self->_tg_html($message), [])) {
+        report->status(502);
+        report->add_error($self->_telegram_error);
+        return undef;
     }
     ($ticket) = $self->query('SELECT * FROM tickets WHERE ticket_id=?', $id);
     return $self->_ticket_data($ticket);
@@ -231,7 +277,11 @@ sub api_send {
     }
     my $message_id = $self->_add_message(ticket_id => $ticket->{ticket_id}, user_id => $user->id, message => $message, media_ids => \@media);
     $self->_set(table => 'tickets', where => {ticket_id => $ticket->{ticket_id}}, status => 'open', updated => now);
-    $self->_send_to_telegram($ticket, "<b>Пользователь #" . $user->id . ":</b>\n" . $self->_tg_html($message), \@media) if $ticket->{telegram_thread_id};
+    if ($ticket->{telegram_thread_id} && !$self->_send_to_telegram($ticket, "<b>Пользователь #" . $user->id . ":</b>\n" . $self->_tg_html($message), \@media)) {
+        report->status(502);
+        report->add_error($self->_telegram_error);
+        return undef;
+    }
     my ($saved) = $self->query('SELECT message_id, ticket_id, user_id, is_admin, message, created FROM ticket_messages WHERE message_id=?', $message_id);
     $saved->{media} = $self->query('SELECT m.id, m.name, m.mime_type, m.size, m.created FROM ticket_message_media mm JOIN ticket_media m ON m.id=mm.media_id WHERE mm.message_id=?', $message_id) || [];
     return $saved;
@@ -297,5 +347,3 @@ sub process_telegram_message {
 }
 
 1;
-
-
