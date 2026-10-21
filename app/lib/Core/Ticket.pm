@@ -293,8 +293,20 @@ sub api_create {
     my $message = $args{message} // '';
     $subject =~ s/^\s+|\s+$//g;
     $message =~ s/^\s+|\s+$//g;
-    unless (length($subject) && length($message)) {
-        report->add_error('Subject and message are required');
+    unless (length($subject)) {
+        report->add_error('Subject is required');
+        return undef;
+    }
+    my @media = grep { /^\d+$/ } @{ $args{media_ids} || [] };
+    if (@media) {
+        my $found = $self->query(
+            'SELECT id FROM ticket_media WHERE user_id=? AND id IN (' . join(',', ('?') x @media) . ')',
+            $user->id, @media,
+        );
+        @media = map { $_->{id} } @{ $found || [] };
+    }
+    unless (length($message) || @media) {
+        report->add_error('Message or attachment is required');
         return undef;
     }
     my $id = $self->_add(
@@ -305,7 +317,7 @@ sub api_create {
     );
     return undef unless $id;
     my ($ticket) = $self->query('SELECT * FROM tickets WHERE ticket_id=?', $id);
-    $self->_add_message(ticket_id => $id, user_id => $user->id, message => $message);
+    $self->_add_message(ticket_id => $id, user_id => $user->id, message => length($message) ? $message : ' ', media_ids => \@media);
     unless ($self->_create_topic($ticket)) {
         report->status(502);
         report->add_error($self->_telegram_error);
@@ -319,8 +331,8 @@ sub api_create {
         . "\nТип: " . $self->_tg_html($ticket_type)
         . "\nПриоритет: " . $self->_tg_html($priority);
     $details .= "\nУслуга: " . $self->_tg_html($service) if defined $service;
-    $details .= "\n\n" . $self->_tg_html($message);
-    unless ($self->_send_to_telegram($ticket, $details, [])) {
+    $details .= "\n\n" . $self->_tg_html($message) if length($message);
+    unless ($self->_send_to_telegram($ticket, $details, \@media)) {
         report->status(502);
         report->add_error($self->_telegram_error);
         return undef;
@@ -341,15 +353,15 @@ sub api_send {
     }
     my $message = $args{message} // '';
     $message =~ s/^\s+|\s+$//g;
-    unless (length($message)) { report->add_error('Message is required'); return undef; }
     my @media = grep { /^\d+$/ } @{ $args{media_ids} || [] };
     if (@media) {
         my $found = $self->query('SELECT id FROM ticket_media WHERE user_id=? AND id IN (' . join(',', ('?') x @media) . ')', $user->id, @media);
         @media = map { $_->{id} } @$found;
     }
-    my $message_id = $self->_add_message(ticket_id => $ticket->{ticket_id}, user_id => $user->id, message => $message, media_ids => \@media);
+    unless (length($message) || @media) { report->add_error('Message or attachment is required'); return undef; }
+    my $message_id = $self->_add_message(ticket_id => $ticket->{ticket_id}, user_id => $user->id, message => length($message) ? $message : ' ', media_ids => \@media);
     $self->_set(table => 'tickets', where => {ticket_id => $ticket->{ticket_id}}, status => 'open', updated => now);
-    if ($ticket->{telegram_thread_id} && !$self->_send_to_telegram($ticket, "<b>Пользователь #" . $user->id . ":</b>\n" . $self->_tg_html($message), \@media)) {
+    if ($ticket->{telegram_thread_id} && !$self->_send_to_telegram($ticket, "<b>Пользователь #" . $user->id . ":</b>" . (length($message) ? "\n" . $self->_tg_html($message) : ''), \@media)) {
         report->status(502);
         report->add_error($self->_telegram_error);
         return undef;
@@ -409,6 +421,87 @@ sub api_download_media {
     return $media->{data};
 }
 
+sub _telegram_message_files {
+    my ( $self, $message ) = @_;
+    my @files;
+
+    if ( my $document = $message->{document} ) {
+        push @files, {
+            file_id => $document->{file_id},
+            name => $document->{file_name} || 'document',
+            mime_type => $document->{mime_type} || 'application/octet-stream',
+            size => $document->{file_size},
+        };
+    }
+
+    if ( ref $message->{photo} eq 'ARRAY' && @{ $message->{photo} } ) {
+        my ($photo) = sort {
+            ($b->{file_size} || 0) <=> ($a->{file_size} || 0)
+                || (($b->{width} || 0) * ($b->{height} || 0)) <=> (($a->{width} || 0) * ($a->{height} || 0))
+        } @{ $message->{photo} };
+        push @files, {
+            file_id => $photo->{file_id},
+            name => 'photo_' . ($message->{message_id} || time) . '.jpg',
+            mime_type => 'image/jpeg',
+            size => $photo->{file_size},
+        } if $photo->{file_id};
+    }
+
+    for my $kind (qw(video animation audio voice)) {
+        my $media = $message->{$kind} || next;
+        my %defaults = (
+            video => ['video.mp4', 'video/mp4'], animation => ['animation.mp4', 'video/mp4'],
+            audio => ['audio.mp3', 'audio/mpeg'], voice => ['voice.ogg', 'audio/ogg'],
+        );
+        push @files, {
+            file_id => $media->{file_id},
+            name => $media->{file_name} || $defaults{$kind}->[0],
+            mime_type => $media->{mime_type} || $defaults{$kind}->[1],
+            size => $media->{file_size},
+        } if $media->{file_id};
+    }
+
+    return @files;
+}
+
+sub _download_telegram_file {
+    my ( $self, $tg, $file_id ) = @_;
+    return undef unless $file_id;
+    my $file = $self->_telegram_result($tg->http('getFile', data => { file_id => $file_id }));
+    return undef unless $file && $file->{file_path};
+
+    my $path = $file->{file_path};
+    return undef if $path =~ m{(?:^|/)\.\.(?:/|$)};
+    my $response = $tg->http_transport->http(
+        method => 'get', binary => 1,
+        url => sprintf('%s/file/bot%s/%s', $tg->telegram_server, $tg->token, $path),
+    );
+    return undef unless $response && $response->is_success;
+    return $response->content;
+}
+
+sub _save_telegram_media {
+    my ( $self, $tg, $ticket, $message ) = @_;
+    my @media_ids;
+    for my $file ($self->_telegram_message_files($message)) {
+        next if defined($file->{size}) && $file->{size} > 5 * 1024 * 1024;
+        my $data = $self->_download_telegram_file($tg, $file->{file_id});
+        unless (defined($data) && length($data) && length($data) <= 5 * 1024 * 1024) {
+            logger->warning('Ticket ' . $ticket->{ticket_id} . ': Telegram attachment was skipped or could not be downloaded');
+            next;
+        }
+        my $name = $file->{name} || 'attachment';
+        $name =~ s/[^\w.() -]+/_/g;
+        my $id = $self->_add(
+            table => 'ticket_media', user_id => $ticket->{user_id},
+            name => substr($name, 0, 255), mime_type => substr($file->{mime_type} || 'application/octet-stream', 0, 100),
+            size => length($data), data => $data,
+        );
+        push @media_ids, $id if $id;
+    }
+    return @media_ids;
+}
+
 sub process_telegram_message {
     my $self = shift;
     my %args = @_;
@@ -438,13 +531,14 @@ sub process_telegram_message {
     }
     return 1 if $ticket->{status} =~ /^(?:closed|archived)$/;
 
+    my $tg = $args{telegram} || $self->_telegram;
+    unless ($tg) {
+        logger->warning('Ticket ' . $ticket->{ticket_id} . ': Telegram transport is unavailable for an incoming reply');
+        return 1;
+    }
+
     unless ($anonymous_admin) {
         # The webhook transport already has the verified bot token and chat ID.
-        my $tg = $args{telegram} || $self->_telegram;
-        unless ($tg) {
-            logger->warning('Ticket ' . $ticket->{ticket_id} . ': Telegram transport is unavailable for an incoming reply');
-            return 1;
-        }
         my $member = $self->_telegram_result(
             $tg->http('getChatMember', data => { user_id => $sender_id })
         );
@@ -454,15 +548,13 @@ sub process_telegram_message {
         }
     }
 
+    my @media_ids = $self->_save_telegram_media($tg, $ticket, $message);
     my $text = $message->{text} // $message->{caption} // '';
-    return 1 unless length $text;
-    $self->_add_message(ticket_id => $ticket->{ticket_id}, user_id => 0, is_admin => 1, message => $text);
+    return 1 unless length($text) || @media_ids;
+    $self->_add_message(ticket_id => $ticket->{ticket_id}, user_id => 0, is_admin => 1, message => length($text) ? $text : ' ', media_ids => \@media_ids);
     $self->_set(table => 'tickets', where => {ticket_id => $ticket->{ticket_id}}, status => 'waiting', updated => now);
     logger->info('Ticket ' . $ticket->{ticket_id} . ': Telegram support reply saved');
     return 1;
 }
 
 1;
-
-
-
