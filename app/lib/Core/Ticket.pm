@@ -355,20 +355,50 @@ sub process_telegram_message {
     my %args = @_;
     my $message = $args{message} || {};
     my $config = $self->_ticket_config || return 0;
-    return 0 unless defined $message->{chat}->{id} && "$message->{chat}->{id}" eq "$config->{id}";
-    return 0 unless $message->{message_thread_id} && $message->{from}->{id};
-    return 0 if $message->{from}->{is_bot};
-    my ($ticket) = $self->query('SELECT * FROM tickets WHERE telegram_chat_id=? AND telegram_thread_id=? LIMIT 1', $config->{id}, $message->{message_thread_id});
-    return 0 unless $ticket;
+    my $chat_id = $message->{chat}->{id};
+    return 0 unless defined $chat_id && "$chat_id" eq "$config->{id}";
+
+    my $thread_id = $message->{message_thread_id};
+    return 0 unless $thread_id;
+    return 1 if $message->{from}->{is_bot};
+
+    # Anonymous administrators are represented by sender_chat rather than from.
+    my $sender_id = $message->{from}->{id};
+    my $anonymous_admin = defined $message->{sender_chat}->{id}
+        && "$message->{sender_chat}->{id}" eq "$config->{id}";
+    return 0 unless $sender_id || $anonymous_admin;
+
+    my ($ticket) = $self->query(
+        'SELECT * FROM tickets WHERE telegram_chat_id=? AND telegram_thread_id=? LIMIT 1',
+        $config->{id}, $thread_id,
+    );
+    unless ($ticket) {
+        logger->debug("Ticket Telegram reply ignored: topic $thread_id is not linked to a ticket");
+        return 0;
+    }
     return 1 if $ticket->{status} =~ /^(?:closed|archived)$/;
 
-    my $tg = $self->_telegram || $args{telegram};
-    my $member = $self->_telegram_result($tg->http('getChatMember', data => { user_id => $message->{from}->{id} }));
-    return 1 unless $member && ($member->{status} // '') =~ /^(?:administrator|creator|owner)$/;
+    unless ($anonymous_admin) {
+        # The webhook transport already has the verified bot token and chat ID.
+        my $tg = $args{telegram} || $self->_telegram;
+        unless ($tg) {
+            logger->warning('Ticket ' . $ticket->{ticket_id} . ': Telegram transport is unavailable for an incoming reply');
+            return 1;
+        }
+        my $member = $self->_telegram_result(
+            $tg->http('getChatMember', data => { user_id => $sender_id })
+        );
+        unless ($member && ($member->{status} // '') =~ /^(?:administrator|creator|owner)$/) {
+            logger->warning('Ticket ' . $ticket->{ticket_id} . ': Telegram reply ignored because sender is not a group administrator');
+            return 1;
+        }
+    }
+
     my $text = $message->{text} // $message->{caption} // '';
     return 1 unless length $text;
     $self->_add_message(ticket_id => $ticket->{ticket_id}, user_id => 0, is_admin => 1, message => $text);
     $self->_set(table => 'tickets', where => {ticket_id => $ticket->{ticket_id}}, status => 'waiting', updated => now);
+    logger->info('Ticket ' . $ticket->{ticket_id} . ': Telegram support reply saved');
     return 1;
 }
 
