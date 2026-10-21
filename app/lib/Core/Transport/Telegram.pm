@@ -1186,18 +1186,6 @@ sub process_message {
         }
     }
 
-    my $template = $self->template( $args{template} );
-    unless ( $template ) {
-        return {
-            method => 'sendMessage',
-            chat_id => $self->{chat_id},
-            parse_mode => 'MarkdownV2',
-            text => sprintf("Ошибка: шаблон `%s` не найден",
-                $args{template},
-            )
-        }
-    }
-
     unless ( $self->{token} ) {
         return {
             method => 'sendMessage',
@@ -1207,6 +1195,31 @@ sub process_message {
                 'https://docs.myshm.ru/docs/setup/servers/transport/telegram/',
                 $self->profile,
                 $chat_id,
+            )
+        }
+    }
+
+    # Ticket replies must not depend on the optional telegram_bot template.
+    # A support-only bot can therefore receive answers from a forum topic.
+    if ( ($self->message->{chat}->{type} // '') =~ /^(?:group|supergroup)$/ ) {
+        my $handled = eval {
+            get_service('Ticket')->process_telegram_message(
+                telegram => $self,
+                message => $self->message,
+            );
+        };
+        logger->warning("Ticket Telegram webhook failed: $@") if $@;
+        return {} if $handled;
+    }
+
+    my $template = $self->template( $args{template} );
+    unless ( $template ) {
+        return {
+            method => 'sendMessage',
+            chat_id => $self->{chat_id},
+            parse_mode => 'MarkdownV2',
+            text => sprintf("Ошибка: шаблон `%s` не найден",
+                $args{template},
             )
         }
     }
@@ -2169,3 +2182,4 @@ sub set_webhook {
 }
 
 1;
+
