@@ -482,40 +482,46 @@ sub cmd {
     return $cmd, @args;
 }
 
-sub uploadDocument {
+sub _upload_file {
     my $self = shift;
+    my $method = shift;
+    my $field = shift;
     my $data = shift;
     my %args = (
-        filename => 'file.conf',
+        filename => 'attachment',
         @_,
     );
 
     return $self->http(
-        'sendDocument',
+        $method,
         content_type => 'form-data',
         data => {
-            document => [ undef, delete $args{filename}, Content =>  $data ],
+            $field => [ undef, delete $args{filename}, Content => $data ],
             %args,
         }
     );
 }
 
-sub uploadPhoto {
+sub uploadDocument { shift->_upload_file('sendDocument', 'document', @_) }
+sub uploadPhoto { shift->_upload_file('sendPhoto', 'photo', @_) }
+sub uploadVideo { shift->_upload_file('sendVideo', 'video', @_) }
+sub uploadAnimation { shift->_upload_file('sendAnimation', 'animation', @_) }
+sub uploadAudio { shift->_upload_file('sendAudio', 'audio', @_) }
+sub uploadVoice { shift->_upload_file('sendVoice', 'voice', @_) }
+
+sub uploadMedia {
     my $self = shift;
     my $data = shift;
-    my %args = (
-        filename => 'image.png',
-        @_,
-    );
+    my %args = @_;
+    my $mime_type = lc(delete($args{mime_type}) || '');
+    my $name = $args{filename} || 'attachment';
 
-    return $self->http(
-        'sendPhoto',
-        content_type => 'form-data',
-        data => {
-            photo => [ undef, delete $args{filename}, Content => $data ],
-            %args,
-        }
-    );
+    return $self->uploadAnimation($data, %args) if $mime_type eq 'image/gif' || $name =~ /\.gif$/i;
+    return $self->uploadPhoto($data, %args) if $mime_type =~ m{^image/};
+    return $self->uploadVideo($data, %args) if $mime_type =~ m{^video/};
+    return $self->uploadVoice($data, %args) if $mime_type =~ m{^audio/ogg} && $name =~ /\.(?:ogg|opus)$/i;
+    return $self->uploadAudio($data, %args) if $mime_type =~ m{^audio/};
+    return $self->uploadDocument($data, %args);
 }
 
 sub http {
@@ -540,7 +546,7 @@ sub http {
     if ( $args{content_type} eq 'form-data' ) {
         my %data = %{ $args{data} };
         for my $k ( keys %data ) {
-            next if $k eq 'document' || $k eq 'photo';
+            next if $k =~ /^(?:document|photo|video|animation|audio|voice)$/;
             if ( ref $data{$k} ) {
                 $data{$k} = encode_json( $data{$k} );
             } elsif ( defined $data{$k} ) {
