@@ -58,6 +58,7 @@ sub structure {
             use_for_stats => 1,
             stats_mode => 'inc',
             stats_use_when_add => 1,
+            stats_group_by => 'service_id',
         },
         expire => {
             type => 'date',
@@ -127,6 +128,21 @@ sub _list {
     }
     delete $args{where}{status} if $args{where}{status} eq 'ANY';
     return $self->SUPER::_list( %args );
+}
+
+# количество услуг по статусам одним запросом (для дашборда):
+# { statuses => { ACTIVE => 10, BLOCK => 2, … }, total => без REMOVED, total_all => все }
+sub statuses {
+    my $self = shift;
+    my $rows = $self->dbh->selectall_arrayref( sprintf( 'SELECT `status`, COUNT(*) FROM %s GROUP BY `status`', $self->table ) );
+    my %statuses = map { $_->[0] => $_->[1] + 0 } @$rows;
+    my $total_all = 0;
+    $total_all += $_ for values %statuses;
+    return {
+        statuses  => \%statuses,
+        total     => $total_all - ( $statuses{ STATUS_REMOVED() } // 0 ),
+        total_all => $total_all,
+    };
 }
 
 sub list_for_api {
@@ -686,6 +702,8 @@ sub status {
 
     if ( $args{event} eq EVENT_PROLONGATE ) {
         $self->set( status_before => $self->get_status );
+        # PROGRESS — промежуточный вызов (ждём дочерние услуги), считаем только итоговый
+        $self->_stats_status( 'event:prolongate' ) if defined $status && $status ne STATUS_PROGRESS;
         return $self->get_status;
     }
 
@@ -693,6 +711,7 @@ sub status {
         $self->get_status ne $status &&
         $self->get_status ne STATUS_REMOVED
     ) {
+        my $status_old = $self->get_status;
 
         logger->info( sprintf('Set new status for service: [usi=%d,si=%d,e=%s,status=%d]',
                 $self->id, $self->get_service_id, $args{event}, $status ) );
@@ -706,6 +725,12 @@ sub status {
             $status_before ? ( status_before => $status_before ) : (),
             status => $status
         );
+
+        # переходы статуса по дням: status:block, status:active:from=block, status:removed:service_id=N
+        if ( $status ne STATUS_PROGRESS ) {
+            my $from = $status_old eq STATUS_PROGRESS ? $self->get_status_before : $status_old;
+            $self->_stats_status( "status:$status", $from );
+        }
 
         if ( $status eq STATUS_REMOVED ) {
             if ( my $wd = $self->withdraw ) {
@@ -732,6 +757,15 @@ sub status {
         }
     }
     return $self->get_status;
+}
+
+# статистика по услугам: общий счётчик, «из какого статуса» и разрез по тарифу
+sub _stats_status {
+    my ( $self, $name, $from ) = @_;
+    my $stats = $self->srv('statistics');
+    $stats->add( $self->kind, $name, 1 );
+    $stats->add( $self->kind, "$name:from=$from", 1 ) if defined $from && length $from;
+    $stats->add( $self->kind, sprintf( '%s:service_id=%s', $name, $self->get_service_id ), 1 ) if $self->get_service_id;
 }
 
 sub service {

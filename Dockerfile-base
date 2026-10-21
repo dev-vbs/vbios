@@ -1,4 +1,4 @@
-FROM debian:bullseye-slim AS core-base
+FROM debian:trixie-slim AS core-base
 WORKDIR /app
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -12,12 +12,15 @@ RUN apt-get update && apt-get install -y \
     perl \
     libdbi-perl \
     libdbd-mysql-perl \
+    libclass-dbi-sqlite-perl \
     libredis-perl \
+    libfcgi-perl \
     libcgi-pm-perl \
     libfcgi-procmanager-perl \
     libtime-parsedate-perl \
     libdate-calc-perl \
     libjson-perl \
+    libtest-deep-perl \
     libtest-mocktime-perl \
     libsql-abstract-perl \
     libnet-openssh-perl \
@@ -36,9 +39,13 @@ RUN apt-get update && apt-get install -y \
     librouter-simple-perl \
     libcryptx-perl \
     libcpanel-json-xs-perl \
+    libpackage-stash-xs-perl \
+    libref-util-xs-perl \
+    libtype-tiny-xs-perl \
     libbytes-random-secure-perl \
     libcrypt-jwt-perl \
     libmime-base32-perl \
+    libmime-tools-perl \
     libmath-random-secure-perl \
     libauthen-sasl-perl \
     libio-socket-ssl-perl \

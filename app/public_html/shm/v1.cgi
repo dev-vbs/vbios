@@ -1123,6 +1123,15 @@ state $routes //= {
         swagger => { summary => 'Удаление списания клиента' },
     },
 },
+'/admin/user/service/statuses' => {
+    swagger => { tags => 'Услуги пользователей' },
+    GET => {
+        params => {},
+        controller => 'USObject',
+        method => 'statuses',
+        swagger => { summary => 'Количество услуг по статусам' },
+    },
+},
 '/admin/user/service/status' => {
     swagger => { tags => 'Услуги пользователей' },
     POST => {
@@ -1685,6 +1694,22 @@ state $routes //= {
         },
         controller => 'Analytics',
         method => 'api_report',
+    },
+},
+'/admin/statistics' => {
+    swagger => { tags => 'Статистика' },
+    GET => {
+        params => {
+            kind  => { type => 'string', pattern => '^\w+$', max_length => 32 },
+            field => { type => 'string', pattern => '^[\w:=%.@-]+$', max_length => 64 },
+            from  => { type => 'string', pattern => '^\d{4}-\d{2}-\d{2}$' },
+            to    => { type => 'string', pattern => '^\d{4}-\d{2}-\d{2}$' },
+            group => { type => 'enum', enum => ['day','week','month','total'] },
+        },
+        controller => 'Statistics',
+        method => 'api_series',
+        common_params => 1,
+        swagger => { summary => 'Статистика: без group — строки таблицы statistics, с group — суммы по day/week/month/total' },
     },
 },
 '/admin/topology' => {
