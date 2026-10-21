@@ -114,6 +114,17 @@ sub _ticket_user_label {
     return $label if length $label;
     return 'Пользователь ' . ($user->id // '');
 }
+sub _ticket_user_reference {
+    my ( $self, $user ) = @_;
+    my $label = $self->_tg_html($self->_ticket_user_label($user));
+    my $base = (cfg('api') || {})->{url} || (cfg('cli') || {})->{url} || '';
+    $base =~ s{/+$}{};
+    return $label unless $base =~ m{^https?://}i && defined $user->id;
+
+    my $href = $self->_tg_html($base . '/users/' . $user->id);
+    $href =~ s/"/&quot;/g;
+    return qq{<a href="$href">$label</a>};
+}
 sub _tg_html {
     my ( $self, $text ) = @_;
     $text //= '';
@@ -260,7 +271,7 @@ sub api_create {
         report->add_error($self->_telegram_error);
         return undef;
     }
-    my $user_label = $self->_tg_html($self->_ticket_user_label($user));
+    my $user_label = $self->_ticket_user_reference($user);
     unless ($self->_send_to_telegram($ticket, "<b>Новое обращение #$id</b>\nПользователь: " . $user_label . "\nТип: " . $ticket->{ticket_type} . "\nПриоритет: " . $ticket->{priority} . "\n\n" . $self->_tg_html($message), [])) {
         report->status(502);
         report->add_error($self->_telegram_error);
@@ -360,12 +371,13 @@ sub process_telegram_message {
 
     my $thread_id = $message->{message_thread_id};
     return 0 unless $thread_id;
-    return 1 if $message->{from}->{is_bot};
+    return 1 if ($message->{from} || {})->{is_bot};
 
     # Anonymous administrators are represented by sender_chat rather than from.
-    my $sender_id = $message->{from}->{id};
-    my $anonymous_admin = defined $message->{sender_chat}->{id}
-        && "$message->{sender_chat}->{id}" eq "$config->{id}";
+    my $sender_id = ($message->{from} || {})->{id};
+    my $sender_chat_id = ($message->{sender_chat} || {})->{id};
+    my $anonymous_admin = defined $sender_chat_id
+        && "$sender_chat_id" eq "$config->{id}";
     return 0 unless $sender_id || $anonymous_admin;
 
     my ($ticket) = $self->query(
