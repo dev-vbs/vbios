@@ -562,6 +562,9 @@ sub process_telegram_message {
         return 1;
     }
 
+    # getChatMember must target the support group, even if the transport profile
+    # has a default chat_id configured for another purpose.
+    $tg->{chat_id} = $config->{id};
     unless ($anonymous_admin) {
         # The webhook transport already has the verified bot token and chat ID.
         my $member = $self->_telegram_result(
