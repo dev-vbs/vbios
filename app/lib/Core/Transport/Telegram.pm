@@ -1314,16 +1314,17 @@ sub process_message {
 sub ticket_group_update {
     my $self = shift;
     my $cfg = cfg('ticket') || {};
+    my $admin_chat = $cfg->{id} || $cfg->{admin_chat_id};
     my $msg = $self->message || {};
-    return {} unless $cfg->{admin_chat_id} && ($msg->{chat}{id}||'') eq $cfg->{admin_chat_id};
+    return {} unless $admin_chat && ($msg->{chat}{id}||'') eq $admin_chat;
     my $thread = $msg->{message_thread_id};
     return {} unless $thread;
-    my $row = $self->dbh->selectrow_hashref('SELECT * FROM tickets WHERE telegram_chat_id=? AND telegram_thread_id=? AND status<>"closed"',undef,$cfg->{admin_chat_id},$thread);
+    my $row = $self->dbh->selectrow_hashref('SELECT * FROM tickets WHERE telegram_chat_id=? AND telegram_thread_id=? AND status<>"closed"',undef,$admin_chat,$thread);
     return {} unless $row;
     my $text = $msg->{text} || $msg->{caption} || '';
     if ($text =~ m{^/close(?:@\S+)?\s*$}i) {
         $self->dbh->do("UPDATE tickets SET status='closed',closed_at=NOW(),updated=NOW() WHERE ticket_id=?",undef,$row->{ticket_id});
-        eval { $self->http('deleteForumTopic',data=>{chat_id=>$cfg->{admin_chat_id},message_thread_id=>$thread}) };
+        eval { $self->http('deleteForumTopic',data=>{chat_id=>$admin_chat,message_thread_id=>$thread}) };
         return {};
     }
     return {} unless length $text;
