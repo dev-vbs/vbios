@@ -622,6 +622,7 @@ sub http {
             logger->warning('Telegram reply_markup was removed because it contained no valid buttons');
         }
     }
+    my $retry_without_reply_markup = delete $args{_retry_without_reply_markup};
     my $method = delete $args{method};
     my $content;
 
@@ -665,6 +666,28 @@ sub http {
         content => $content,
     );
 
+    # A rejected keyboard must not prevent delivery of the message itself.
+    # Telegram has already rejected the original request, so retrying without
+    # reply_markup cannot create a duplicate message.
+    if (
+        !$response->is_success
+        && !$retry_without_reply_markup
+        && ref $args{data} eq 'HASH'
+        && exists $args{data}->{reply_markup}
+        && ($response->decoded_content // '') =~ /BUTTON_TYPE_INVALID/
+    ) {
+        logger->warning('Telegram rejected reply_markup; retrying the request without keyboard');
+        my %retry_data = %{ $args{data} };
+        delete $retry_data{reply_markup};
+        return $self->http(
+            $url,
+            method => $method,
+            content_type => $args{content_type},
+            chat_id => $args{chat_id},
+            data => \%retry_data,
+            _retry_without_reply_markup => 1,
+        );
+    }
     logger->dump('Send to TG API', $response->request );
     logger->dump('Answer from TG API', $response->decoded_content );
 
@@ -2267,3 +2290,4 @@ sub set_webhook {
 }
 
 1;
+
