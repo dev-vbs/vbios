@@ -1262,6 +1262,11 @@ sub process_message {
         return {};
     }
 
+    # Forum topics in the configured admin group are the backend for user tickets.
+    # They are handled before the normal private-chat bot flow.
+    if (($self->message->{chat}->{type} || '') eq 'supergroup' || ($self->message->{chat}->{type} || '') eq 'group') {
+        return $self->ticket_group_update;
+    }
     return undef if $self->message->{chat}->{type} ne 'private';
     return undef unless $self->token;
 
@@ -1304,6 +1309,32 @@ sub process_message {
     return {};
     # Reply directly for only first response
     return get_last_object( $response );
+}
+
+sub ticket_group_update {
+    my $self = shift;
+    my $cfg = cfg('ticket') || {};
+    my $msg = $self->message || {};
+    return {} unless $cfg->{admin_chat_id} && ($msg->{chat}{id}||'') eq $cfg->{admin_chat_id};
+    my $thread = $msg->{message_thread_id};
+    return {} unless $thread;
+    my $row = $self->dbh->selectrow_hashref('SELECT * FROM tickets WHERE telegram_chat_id=? AND telegram_thread_id=? AND status<>"closed"',undef,$cfg->{admin_chat_id},$thread);
+    return {} unless $row;
+    my $text = $msg->{text} || $msg->{caption} || '';
+    if ($text =~ m{^/close(?:@\S+)?\s*$}i) {
+        $self->dbh->do("UPDATE tickets SET status='closed',closed_at=NOW(),updated=NOW() WHERE ticket_id=?",undef,$row->{ticket_id});
+        eval { $self->http('deleteForumTopic',data=>{chat_id=>$cfg->{admin_chat_id},message_thread_id=>$thread}) };
+        return {};
+    }
+    return {} unless length $text;
+    $self->dbh->do('INSERT INTO ticket_messages(ticket_id,user_id,is_admin,message) VALUES(?,?,1,?)',undef,$row->{ticket_id},0,$text);
+    $self->dbh->do("UPDATE tickets SET status='in_progress',updated=NOW() WHERE ticket_id=?",undef,$row->{ticket_id});
+    my $u = $self->user($row->{user_id});
+    my $tg_data = $u ? ($u->settings->{telegram} || {}) : {};
+    my $profile_data = $tg_data->{$self->profile_name} || $tg_data;
+    my $user_chat = $profile_data->{chat_id} || $profile_data->{user_id};
+    $self->http('sendMessage',data=>{chat_id=>$user_chat,text=>'Ответ поддержки по тикету #'.$row->{ticket_id}."\n\n".$text}) if $user_chat;
+    return {};
 }
 
 sub get_last_object {
