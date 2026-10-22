@@ -554,6 +554,30 @@ sub process_telegram_message {
         logger->debug("Ticket Telegram reply ignored: topic $thread_id is not linked to a ticket");
         return 0;
     }
+    # Telegram sends this service message when an administrator closes a forum
+    # topic manually. Keep the ticket state in sync and remove that topic.
+    if ($message->{forum_topic_closed}) {
+        $self->_set(
+            table => 'tickets', where => { ticket_id => $ticket->{ticket_id} },
+            status => 'closed', closed_at => now, updated => now,
+        );
+        my $tg = $args{telegram} || $self->_telegram;
+        if ($tg) {
+            $tg->{chat_id} = $config->{id};
+            my $response = $tg->http('deleteForumTopic', data => {
+                message_thread_id => $thread_id,
+            });
+            unless ($self->_telegram_result($response)) {
+                my $error = $self->_telegram_error($response);
+                $self->_set(
+                    table => 'tickets', where => { ticket_id => $ticket->{ticket_id} },
+                    telegram_error => $error,
+                );
+                logger->warning('Ticket ' . $ticket->{ticket_id} . ': failed to delete closed Telegram topic: ' . $error);
+            }
+        }
+        return 1;
+    }
     return 1 if $ticket->{status} =~ /^(?:closed|archived)$/;
 
     my $tg = $args{telegram} || $self->_telegram;
@@ -586,6 +610,3 @@ sub process_telegram_message {
 }
 
 1;
-
-
-
