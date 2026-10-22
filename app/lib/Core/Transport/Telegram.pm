@@ -482,48 +482,97 @@ sub cmd {
     return $cmd, @args;
 }
 
-sub _upload_file {
+sub uploadDocument {
     my $self = shift;
-    my $method = shift;
-    my $field = shift;
     my $data = shift;
     my %args = (
-        filename => 'attachment',
+        filename => 'file.conf',
         @_,
     );
 
     return $self->http(
-        $method,
+        'sendDocument',
         content_type => 'form-data',
         data => {
-            $field => [ undef, delete $args{filename}, Content => $data ],
+            document => [ undef, delete $args{filename}, Content =>  $data ],
             %args,
         }
     );
 }
 
-sub uploadDocument { shift->_upload_file('sendDocument', 'document', @_) }
-sub uploadPhoto { shift->_upload_file('sendPhoto', 'photo', @_) }
-sub uploadVideo { shift->_upload_file('sendVideo', 'video', @_) }
-sub uploadAnimation { shift->_upload_file('sendAnimation', 'animation', @_) }
-sub uploadAudio { shift->_upload_file('sendAudio', 'audio', @_) }
-sub uploadVoice { shift->_upload_file('sendVoice', 'voice', @_) }
-
-sub uploadMedia {
+sub uploadPhoto {
     my $self = shift;
     my $data = shift;
-    my %args = @_;
-    my $mime_type = lc(delete($args{mime_type}) || '');
-    my $name = $args{filename} || 'attachment';
+    my %args = (
+        filename => 'image.png',
+        @_,
+    );
 
-    return $self->uploadAnimation($data, %args) if $mime_type eq 'image/gif' || $name =~ /\.gif$/i;
-    return $self->uploadPhoto($data, %args) if $mime_type =~ m{^image/};
-    return $self->uploadVideo($data, %args) if $mime_type =~ m{^video/};
-    return $self->uploadVoice($data, %args) if $mime_type =~ m{^audio/ogg} && $name =~ /\.(?:ogg|opus)$/i;
-    return $self->uploadAudio($data, %args) if $mime_type =~ m{^audio/};
-    return $self->uploadDocument($data, %args);
+    return $self->http(
+        'sendPhoto',
+        content_type => 'form-data',
+        data => {
+            photo => [ undef, delete $args{filename}, Content => $data ],
+            %args,
+        }
+    );
 }
 
+# Telegram accepts exactly one action field in each inline button. Template
+# variables can leave unused fields as undef; JSON serializes those as null,
+# causing Telegram to reject the entire keyboard with BUTTON_TYPE_INVALID.
+sub normalize_inline_keyboard {
+    my $self = shift;
+    my $markup = shift;
+
+    return $markup unless ref $markup eq 'HASH';
+    my $keyboard = $markup->{inline_keyboard};
+    return $markup unless ref $keyboard eq 'ARRAY';
+
+    my @actions = qw(
+        callback_data url web_app login_url
+        switch_inline_query switch_inline_query_current_chat
+        switch_inline_query_chosen_chat callback_game pay copy_text
+    );
+    my %priority = map { $actions[$_] => $_ } 0 .. $#actions;
+
+    for my $row ( @$keyboard ) {
+        next unless ref $row eq 'ARRAY';
+        for my $button ( @$row ) {
+            next unless ref $button eq 'HASH';
+
+            delete $button->{$_} for grep { exists $button->{$_} && !defined $button->{$_} } keys %$button;
+            for my $field ( qw(web_app login_url) ) {
+                next unless exists $button->{$field};
+                my $value = $button->{$field};
+                delete $button->{$field}
+                    unless ref $value eq 'HASH' && defined $value->{url} && length $value->{url};
+            }
+
+            my @present = grep { exists $button->{$_} } @actions;
+            next unless @present > 1;
+
+            @present = sort { $priority{$a} <=> $priority{$b} } @present;
+            my $keep = $present[0];
+            delete $button->{$_} for grep { $_ ne $keep } @present;
+            logger->warning("Telegram inline button has multiple actions; keeping $keep");
+        }
+    }
+
+    my @valid_rows;
+    for my $row ( @$keyboard ) {
+        next unless ref $row eq 'ARRAY';
+        my @buttons;
+        for my $button ( @$row ) {
+            next unless ref $button eq 'HASH';
+            push @buttons, $button if grep { exists $button->{$_} } @actions;
+        }
+        logger->warning('Telegram inline button has no action; omitting it') if @buttons < @$row;
+        push @valid_rows, \@buttons if @buttons;
+    }
+    $markup->{inline_keyboard} = \@valid_rows;
+    return $markup;
+}
 sub http {
     my $self = shift;
     my $url = shift;
@@ -541,12 +590,15 @@ sub http {
     }
 
     my $method = delete $args{method};
+    if ( ref $args{data} eq 'HASH' && ref $args{data}{reply_markup} eq 'HASH' ) {
+        $self->normalize_inline_keyboard( $args{data}{reply_markup} );
+    }
     my $content;
 
     if ( $args{content_type} eq 'form-data' ) {
         my %data = %{ $args{data} };
         for my $k ( keys %data ) {
-            next if $k =~ /^(?:document|photo|video|animation|audio|voice)$/;
+            next if $k eq 'document' || $k eq 'photo';
             if ( ref $data{$k} ) {
                 $data{$k} = encode_json( $data{$k} );
             } elsif ( defined $data{$k} ) {
@@ -1192,6 +1244,18 @@ sub process_message {
         }
     }
 
+    my $template = $self->template( $args{template} );
+    unless ( $template ) {
+        return {
+            method => 'sendMessage',
+            chat_id => $self->{chat_id},
+            parse_mode => 'MarkdownV2',
+            text => sprintf("Ошибка: шаблон `%s` не найден",
+                $args{template},
+            )
+        }
+    }
+
     unless ( $self->{token} ) {
         return {
             method => 'sendMessage',
@@ -1201,31 +1265,6 @@ sub process_message {
                 'https://docs.myshm.ru/docs/setup/servers/transport/telegram/',
                 $self->profile,
                 $chat_id,
-            )
-        }
-    }
-
-    # Ticket replies must not depend on the optional telegram_bot template.
-    # A support-only bot can therefore receive answers from a forum topic.
-    if ( ($self->message->{chat}->{type} // '') =~ /^(?:group|supergroup)$/ ) {
-        my $handled = eval {
-            get_service('Ticket')->process_telegram_message(
-                telegram => $self,
-                message => $self->message,
-            );
-        };
-        logger->warning("Ticket Telegram webhook failed: $@") if $@;
-        return {} if $handled;
-    }
-
-    my $template = $self->template( $args{template} );
-    unless ( $template ) {
-        return {
-            method => 'sendMessage',
-            chat_id => $self->{chat_id},
-            parse_mode => 'MarkdownV2',
-            text => sprintf("Ошибка: шаблон `%s` не найден",
-                $args{template},
             )
         }
     }
@@ -2188,4 +2227,5 @@ sub set_webhook {
 }
 
 1;
+
 
