@@ -518,60 +518,20 @@ sub uploadPhoto {
     );
 }
 
-# Telegram accepts exactly one action field in each inline button. Template
-# variables can leave unused fields as undef; JSON serializes those as null,
-# causing Telegram to reject the entire keyboard with BUTTON_TYPE_INVALID.
-sub normalize_inline_keyboard {
+# Upload a ticket attachment using the Telegram method appropriate for its MIME type.
+# The default is sendDocument so unsupported image formats remain downloadable.
+sub uploadMedia {
     my $self = shift;
-    my $markup = shift;
-
-    return $markup unless ref $markup eq 'HASH';
-    my $keyboard = $markup->{inline_keyboard};
-    return $markup unless ref $keyboard eq 'ARRAY';
-
-    my @actions = qw(
-        callback_data url web_app login_url
-        switch_inline_query switch_inline_query_current_chat
-        switch_inline_query_chosen_chat callback_game pay copy_text
+    my $data = shift;
+    my %args = (
+        filename  => 'attachment',
+        mime_type => 'application/octet-stream',
+        @_,
     );
-    my %priority = map { $actions[$_] => $_ } 0 .. $#actions;
 
-    for my $row ( @$keyboard ) {
-        next unless ref $row eq 'ARRAY';
-        for my $button ( @$row ) {
-            next unless ref $button eq 'HASH';
-
-            delete $button->{$_} for grep { exists $button->{$_} && !defined $button->{$_} } keys %$button;
-            for my $field ( qw(web_app login_url) ) {
-                next unless exists $button->{$field};
-                my $value = $button->{$field};
-                delete $button->{$field}
-                    unless ref $value eq 'HASH' && defined $value->{url} && length $value->{url};
-            }
-
-            my @present = grep { exists $button->{$_} } @actions;
-            next unless @present > 1;
-
-            @present = sort { $priority{$a} <=> $priority{$b} } @present;
-            my $keep = $present[0];
-            delete $button->{$_} for grep { $_ ne $keep } @present;
-            logger->warning("Telegram inline button has multiple actions; keeping $keep");
-        }
-    }
-
-    my @valid_rows;
-    for my $row ( @$keyboard ) {
-        next unless ref $row eq 'ARRAY';
-        my @buttons;
-        for my $button ( @$row ) {
-            next unless ref $button eq 'HASH';
-            push @buttons, $button if grep { exists $button->{$_} } @actions;
-        }
-        logger->warning('Telegram inline button has no action; omitting it') if @buttons < @$row;
-        push @valid_rows, \@buttons if @buttons;
-    }
-    $markup->{inline_keyboard} = \@valid_rows;
-    return $markup;
+    my $mime_type = delete $args{mime_type};
+    return $self->uploadPhoto($data, %args) if $mime_type =~ m{^image/(?:jpeg|jpg|png|webp)$}i;
+    return $self->uploadDocument($data, %args);
 }
 sub http {
     my $self = shift;
@@ -590,9 +550,6 @@ sub http {
     }
 
     my $method = delete $args{method};
-    if ( ref $args{data} eq 'HASH' && ref $args{data}{reply_markup} eq 'HASH' ) {
-        $self->normalize_inline_keyboard( $args{data}{reply_markup} );
-    }
     my $content;
 
     if ( $args{content_type} eq 'form-data' ) {
@@ -1269,6 +1226,17 @@ sub process_message {
         }
     }
 
+    # Ticket replies are handled before the private-chat-only bot flow.
+    # The ticket service claims an update only when it belongs to its configured
+    # group and to a forum topic linked to an existing ticket.
+    if ( my $message = $self->get_message ) {
+        if ( my $ticket = get_service('Ticket') ) {
+            return {} if $ticket->process_telegram_message(
+                message  => $message,
+                telegram => $self,
+            );
+        }
+    }
     my $user = $self->auth();
 
     if ( my $data = $self->get_pre_checkout_query ) {
@@ -2227,5 +2195,3 @@ sub set_webhook {
 }
 
 1;
-
-
