@@ -1743,6 +1743,24 @@ state $routes //= {
         method => 'clear_cache',
     },
 },
+'/user/ticket' => {
+    swagger => { tags => 'Tickets' },
+    GET => { controller => 'Ticket', method => 'api_list', params => { status => { type => 'string' } } },
+    PUT => { controller => 'Ticket', method => 'api_create', params => { subject => { type => 'string', max_length => 160 }, message => { type => 'string', required => 1, max_length => 10000 }, priority => { type => 'string', max_length => 16 }, ticket_type => { type => 'string', max_length => 16 }, user_service_id => { type => 'integer' }, media_ids => { type => 'array' } } },
+},
+'/user/ticket/media' => {
+    PUT => { controller => 'Ticket', method => 'api_media', params => { name => { type => 'string', required => 1, max_length => 255 }, data => { type => 'string', required => 1 }, mime_type => { type => 'string', max_length => 100 } } },
+},
+'/user/ticket/media/*' => {
+    splat_to => 'id',
+    GET => { controller => 'Ticket', method => 'api_media_download', params => { id => { type => 'integer', required => 1 } } },
+},
+'/user/ticket/*' => {
+    splat_to => 'ticket_id',
+    GET => { controller => 'Ticket', method => 'api_get', params => { ticket_id => { type => 'integer', required => 1 } } },
+    POST => { controller => 'Ticket', method => 'api_message', params => { ticket_id => { type => 'integer', required => 1 }, message => { type => 'string', required => 1, max_length => 10000 }, media_ids => { type => 'array' } } },
+    DELETE => { controller => 'Ticket', method => 'api_close', params => { ticket_id => { type => 'integer', required => 1 } } },
+},
 '/telegram/user' => {
     swagger => {
         tags => 'Telegram bot',
