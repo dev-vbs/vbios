@@ -1120,6 +1120,17 @@ sub list_for_api {
     return @list;
 }
 
+sub api_profile_update {
+    my $self = shift;
+    my %args = get_smart_args(@_);
+    my %update;
+    $update{full_name} = $args{full_name} if exists $args{full_name};
+    $update{phone} = $args{phone} if exists $args{phone};
+    return { error => 'Нет данных для изменения' } unless %update;
+    $self->set(%update);
+    return { ok => 1, data => { $self->list_for_api } };
+}
+
 sub found_rows {
     my $self = shift;
     return exists $self->{_found_rows_cache}
