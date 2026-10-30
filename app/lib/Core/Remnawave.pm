@@ -27,18 +27,18 @@ sub _remna_id {
     my $cfg=$self->_cfg;
     my $prefix=$cfg->{storage_prefix} || 'vpn_mrzb_';
     my $data=eval { $self->srv('storage')->read(name=>$prefix.$row->{user_service_id}) } || {};
-    my $id=$data->{id} || $data->{user}{id} || $data->{response}{user}{id};
+    my $id=$data->{id} || $data->{uuid} || $data->{user}{id} || $data->{user}{uuid} || $data->{response}{user}{id} || $data->{response}{user}{uuid};
     if (!$id && $data->{shortUuid}) {
         my $resolved=$self->_request(path=>'/api/users/by-short-uuid/'.$data->{shortUuid});
-        $id=$resolved->{response}{id} || $resolved->{id} || $resolved->{data}{id};
+        $id=$resolved->{response}{id} || $resolved->{response}{uuid} || $resolved->{id} || $resolved->{uuid} || $resolved->{data}{id} || $resolved->{data}{uuid};
     }
     if (!$id) {
         my $prefix=$cfg->{username_prefix} || 'vBios_us_';
         my $resolved=eval { $self->_request(path=>'/api/users/by-username/'.$prefix.$row->{user_service_id}) } || {};
-        $id=$resolved->{response}{id} || $resolved->{id} || $resolved->{data}{id} || $resolved->{response}{user}{id};
+        $id=$resolved->{response}{id} || $resolved->{response}{uuid} || $resolved->{id} || $resolved->{uuid} || $resolved->{data}{id} || $resolved->{data}{uuid} || $resolved->{response}{user}{id} || $resolved->{response}{user}{uuid};
     }
-    die 'Remnawave numeric user id is not found for this service' unless defined $id && "$id" =~ /^\d+$/;
-    return int($id);
+    die 'Remnawave user id is not found for this service' unless defined $id && "$id" =~ /^[A-Za-z0-9_-]+$/;
+    return $id;
 }
 sub _limit { my ($self,$row)=@_; my $settings=eval { decode_json($row->{settings}||'{}') } || {}; return int($settings->{hwidDeviceLimit} || $settings->{hwid_device_limit} || 3) }
 sub api_hwid_list {
