@@ -529,7 +529,7 @@ sub http {
         @_,
     );
 
-    unless ( $self->token && $self->chat_id ) {
+    unless ( $self->token && ( $args{chat_id} || $args{data}{chat_id} ) ) {
         logger->error('token or chat_id not defined');
         return {};
     }
@@ -1329,7 +1329,7 @@ sub ticket_group_update {
     }
     return {} unless length $text;
     $self->dbh->do('INSERT INTO ticket_messages(ticket_id,user_id,is_admin,message) VALUES(?,?,1,?)',undef,$row->{ticket_id},0,$text);
-    $self->dbh->do("UPDATE tickets SET status='in_progress',updated=NOW() WHERE ticket_id=?",undef,$row->{ticket_id});
+    $self->dbh->do("UPDATE tickets SET status='waiting',updated=NOW() WHERE ticket_id=?",undef,$row->{ticket_id});
     my $u = $self->user($row->{user_id});
     my $tg_data = $u ? ($u->settings->{telegram} || {}) : {};
     my $profile_data = $tg_data->{$self->profile_name} || $tg_data;
