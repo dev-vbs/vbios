@@ -27,6 +27,11 @@ sub _remna_id {
         my $resolved=$self->_request(path=>'/api/users/by-short-uuid/'.$data->{shortUuid});
         $id=$resolved->{response}{id} || $resolved->{id} || $resolved->{data}{id};
     }
+    if (!$id) {
+        my $prefix=$cfg->{username_prefix} || 'vBios_us_';
+        my $resolved=eval { $self->_request(path=>'/api/users/by-username/'.$prefix.$row->{user_service_id}) } || {};
+        $id=$resolved->{response}{id} || $resolved->{id} || $resolved->{data}{id} || $resolved->{response}{user}{id};
+    }
     die 'Remnawave numeric user id is not found for this service' unless defined $id && "$id" =~ /^\d+$/;
     return int($id);
 }
