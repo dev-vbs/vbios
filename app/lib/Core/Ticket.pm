@@ -30,9 +30,9 @@ sub _input { my ($self,%a)=@_; return (%a ? %a : %{$self->res||{}}) }
 sub api_list {
     my ($self,%a)=@_; my $uid=$self->user_id; my $status=$a{status};
     my $sql='SELECT * FROM tickets WHERE user_id=?'; my @p=($uid); if (defined $status && length $status) { $sql.=' AND status=?'; push @p,$status } $sql.=' ORDER BY updated DESC LIMIT 100';
-    my $rows=$self->dbh->selectall_arrayref($sql,{Slice=>{}},@p); $_->{messages}=$self->_messages($_->{ticket_id}) for @$rows; return $rows;
+    my $rows=$self->dbh->selectall_arrayref($sql,{Slice=>{}},@p); $_->{messages}=$self->_messages($_->{ticket_id}) for @$rows; return wantarray ? @$rows : $rows;
 }
-sub api_get { my ($self,%a)=@_; my $id=$a{ticket_id}||$a{id}; my $row=$self->_row($id); die 'ticket not found' unless $row && $row->{user_id} == $self->user_id; return [$self->_result($id,1)] }
+sub api_get { my ($self,%a)=@_; my $id=$a{ticket_id}||$a{id}; my $row=$self->_row($id); die 'ticket not found' unless $row && $row->{user_id} == $self->user_id; return $self->_result($id,1) }
 sub api_create {
     my ($self,%a)=@_; my $uid=$self->user_id; my $subject=substr(($a{subject}//'Без темы'),0,160); my $msg=substr(($a{message}//''),0,10000); die 'message is required' unless length $msg;
     my $id=$self->add(user_id=>$uid,subject=>$subject,status=>'open',priority=>($a{priority}||'normal'),ticket_type=>($a{ticket_type}||'other'),user_service_id=>$a{user_service_id});
