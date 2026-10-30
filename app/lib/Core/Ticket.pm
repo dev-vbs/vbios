@@ -35,6 +35,10 @@ sub api_list {
 sub api_get { my ($self,%a)=@_; my $id=$a{ticket_id}||$a{id}; my $row=$self->_row($id); die 'ticket not found' unless $row && $row->{user_id} == $self->user_id; return $self->_result($id,1) }
 sub api_create {
     my ($self,%a)=@_; my $uid=$self->user_id; my $subject=substr(($a{subject}//'Без темы'),0,160); my $msg=substr(($a{message}//''),0,10000); die 'message is required' unless length $msg;
+    if ($a{user_service_id}) {
+        my ($owned) = $self->dbh->selectrow_array('SELECT 1 FROM user_services WHERE user_service_id=? AND user_id=?', undef, $a{user_service_id}, $uid);
+        die 'service not found' unless $owned;
+    }
     my $id=$self->add(user_id=>$uid,subject=>$subject,status=>'open',priority=>($a{priority}||'normal'),ticket_type=>($a{ticket_type}||'other'),user_service_id=>$a{user_service_id});
     $self->_add_message($id,$uid,0,$msg,$a{media_ids});
     # Telegram is an external service. Never roll back a successfully created
@@ -88,10 +92,34 @@ sub telegram_sync {
         die 'Telegram topic creation failed: ' . ($result->{description} || 'no response') unless $result->{ok} && $thread;
         $self->dbh->do('UPDATE tickets SET telegram_chat_id=?,telegram_thread_id=? WHERE ticket_id=?', undef, $chat, $thread, $id);
     }
-    my $text = "Тикет #$id\nПользователь: $r->{user_id}\nТема: $r->{subject}\n\n" . $m->{message};
+    my $u = $self->dbh->selectrow_hashref('SELECT login,full_name FROM users WHERE user_id=?', undef, $r->{user_id}) || {};
+    my $display = $u->{full_name} || $u->{login} || 'Пользователь';
+    $display =~ s/[\r\n]+/ /g;
+    my $subject = $r->{subject} || 'Без темы';
+    $subject =~ s/[\r\n]+/ /g;
+    my %types = (service => 'Услуга', payment => 'Оплата', other => 'Другое');
+    my %priorities = (low => 'Низкий', normal => 'Обычный', high => 'Высокий', urgent => 'Срочный');
+    my $kind = $types{$r->{ticket_type} || ''} || 'Другое';
+    my $priority = $priorities{$r->{priority} || ''} || 'Обычный';
+    my $service_line = '';
+    if ($r->{user_service_id}) {
+        my $service = $self->dbh->selectrow_hashref('SELECT s.name FROM user_services us JOIN services s ON s.service_id=us.service_id WHERE us.user_service_id=? AND us.user_id=?', undef, $r->{user_service_id}, $r->{user_id});
+        my $name = $service && $service->{name} ? $service->{name} : 'Название недоступно';
+        $name =~ s/[\r\n]+/ /g;
+        $service_line = "\n🌐 Услуга: $name (#$r->{user_service_id})";
+    }
+    my $heading = $m->{message_id} == ($self->dbh->selectrow_array('SELECT MIN(message_id) FROM ticket_messages WHERE ticket_id=?', undef, $id) || 0) ? 'Новое обращение' : 'Новое сообщение';
+    my $text = "📩 $heading #$id\n👤 $display · ID $r->{user_id}\n📌 $subject\n📂 $kind · ⚡ $priority$service_line\n\n💬 " . $m->{message};
     $text = substr($text, 0, 4000);
+    my $keyboard;
+    if (defined $cfg->{admin_user_url_template} && $cfg->{admin_user_url_template} =~ m{^https://[^\s]+$} && $cfg->{admin_user_url_template} =~ /\{user_id\}/) {
+        my $url = $cfg->{admin_user_url_template};
+        $url =~ s/\{user_id\}/$r->{user_id}/g;
+        $keyboard = { inline_keyboard => [[{ text => '👤 Открыть пользователя', url => $url }]] };
+    }
     my $response = $tg->http('sendMessage', chat_id => $chat, data => {
         chat_id => $chat, ($thread ? (message_thread_id => $thread) : ()), text => $text,
+        ($keyboard ? (reply_markup => $keyboard) : ()),
     });
     my $body = eval { $response->decoded_content } || '';
     my $result = eval { decode_json($body) } || {};
