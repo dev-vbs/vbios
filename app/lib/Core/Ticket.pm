@@ -32,7 +32,7 @@ sub api_list {
     my $sql='SELECT * FROM tickets WHERE user_id=?'; my @p=($uid); if (defined $status && length $status) { $sql.=' AND status=?'; push @p,$status } $sql.=' ORDER BY updated DESC LIMIT 100';
     my $rows=$self->dbh->selectall_arrayref($sql,{Slice=>{}},@p); $_->{messages}=$self->_messages($_->{ticket_id}) for @$rows; return $rows;
 }
-sub api_get { my ($self,%a)=@_; my $id=$a{ticket_id}||$a{id}; return [$self->_result($id,1)] }
+sub api_get { my ($self,%a)=@_; my $id=$a{ticket_id}||$a{id}; my $row=$self->_row($id); die 'ticket not found' unless $row && $row->{user_id} == $self->user_id; return [$self->_result($id,1)] }
 sub api_create {
     my ($self,%a)=@_; my $uid=$self->user_id; my $subject=substr(($a{subject}//'Без темы'),0,160); my $msg=substr(($a{message}//''),0,10000); die 'message is required' unless length $msg;
     my $id=$self->add(user_id=>$uid,subject=>$subject,status=>'open',priority=>($a{priority}||'normal'),ticket_type=>($a{ticket_type}||'other'),user_service_id=>$a{user_service_id});
@@ -47,7 +47,7 @@ sub api_create {
 }
 sub _add_message {
     my ($self,$tid,$uid,$admin,$msg,$media)=@_; my $mid=$self->dbh->do('INSERT INTO ticket_messages(ticket_id,user_id,is_admin,message) VALUES(?,?,?,?)',undef,$tid,$uid,$admin,$msg); $mid=$self->insert_id;
-    for my $media_id (@{$media||[]}) { $self->dbh->do('INSERT IGNORE INTO ticket_message_media(message_id,media_id) VALUES(?,?)',undef,$mid,$media_id) }
+    for my $media_id (@{$media||[]}) { $self->dbh->do('INSERT IGNORE INTO ticket_message_media(message_id,media_id) SELECT ?,id FROM ticket_media WHERE id=? AND user_id=?',undef,$mid,$media_id,$uid) }
     $self->dbh->do('UPDATE tickets SET status=?,updated=NOW() WHERE ticket_id=?',undef,$admin?'waiting':'open',$tid); return $mid;
 }
 sub api_message { my ($self,%a)=@_; my $id=$a{ticket_id}||$a{id}; my $r=$self->_row($id); die 'ticket not found' unless $r && $r->{user_id}==$self->user_id; die 'ticket closed' if $r->{status} eq 'closed'; my $mid=$self->_add_message($id,$self->user_id,0,substr(($a{message}//''),0,10000),$a{media_ids}); eval { $self->telegram_sync($id); 1 } or $self->dbh->do('UPDATE tickets SET telegram_error=? WHERE ticket_id=?',undef,substr("$@",0,255),$id); return $self->dbh->selectrow_hashref('SELECT * FROM ticket_messages WHERE message_id=?',undef,$mid) }
@@ -57,10 +57,35 @@ sub api_media_download { my ($self,%a)=@_; my $r=$self->dbh->selectrow_hashref('
 
 sub _tg { my $self=shift; my $tg=get_service('Transport::Telegram') or die 'Telegram transport is unavailable'; my $cfg=get_service('config')->data_by_name('ticket')||{}; $tg->profile($cfg->{telegram_profile}||'telegram_bot'); return $tg }
 sub telegram_sync {
-    my ($self,$id)=@_; my $cfg=get_service('config')->data_by_name('ticket')||{}; my $chat=$cfg->{id}||$cfg->{admin_chat_id}; return unless $chat; my $r=$self->_row($id); my $tg=$self->_tg; my $thread=$r->{telegram_thread_id};
-    unless ($thread) { my $response=$tg->http('createForumTopic',data=>{chat_id=>$chat,name=>substr("#${id} $r->{subject}",0,128)}); my $body=eval { $response->decoded_content } // ''; my $topic=eval { decode_json($body) } || {}; $thread=$topic->{result}{message_thread_id}; unless ($thread) { $self->dbh->do('UPDATE tickets SET telegram_error=? WHERE ticket_id=?',undef,substr($body||'topic creation failed',0,255),$id); return } $self->dbh->do('UPDATE tickets SET telegram_chat_id=?,telegram_thread_id=?,telegram_error=NULL WHERE ticket_id=?',undef,$chat,$thread,$id) }
-    my $m=$self->dbh->selectrow_hashref('SELECT * FROM ticket_messages WHERE ticket_id=? ORDER BY message_id DESC LIMIT 1',undef,$id); return unless $m;
-    $tg->http('sendMessage',data=>{chat_id=>$chat,message_thread_id=>$thread,text=>($m->{is_admin}?'👤 Ответ пользователя':'🛠 Ответ поддержки')."\n\n".$m->{message}});
+    my ($self, $id) = @_;
+    my $cfg = get_service('config')->data_by_name('ticket') || {};
+    my $chat = $cfg->{id} || $cfg->{admin_chat_id};
+    unless ($chat) {
+        $self->dbh->do('UPDATE tickets SET telegram_error=? WHERE ticket_id=?', undef, 'Telegram chat is not configured', $id);
+        return;
+    }
+    my $r = $self->_row($id) or die 'ticket not found';
+    my $m = $self->dbh->selectrow_hashref('SELECT * FROM ticket_messages WHERE ticket_id=? ORDER BY message_id DESC LIMIT 1', undef, $id) or return;
+    my $tg = $self->_tg;
+    my $thread = $r->{telegram_thread_id};
+    # Forum topics are opt-in. Plain chats and ordinary groups receive messages directly.
+    if ($cfg->{forum_topics} && !$thread) {
+        my $response = $tg->http('createForumTopic', chat_id => $chat, data => {chat_id => $chat, name => substr("#$id $r->{subject}", 0, 128)});
+        my $body = eval { $response->decoded_content } || '';
+        my $result = eval { decode_json($body) } || {};
+        $thread = $result->{result}{message_thread_id};
+        die 'Telegram topic creation failed: ' . ($result->{description} || 'no response') unless $result->{ok} && $thread;
+        $self->dbh->do('UPDATE tickets SET telegram_chat_id=?,telegram_thread_id=? WHERE ticket_id=?', undef, $chat, $thread, $id);
+    }
+    my $text = "Тикет #$id\nПользователь: $r->{user_id}\nТема: $r->{subject}\n\n" . $m->{message};
+    $text = substr($text, 0, 4000);
+    my $response = $tg->http('sendMessage', chat_id => $chat, data => {
+        chat_id => $chat, ($thread ? (message_thread_id => $thread) : ()), text => $text,
+    });
+    my $body = eval { $response->decoded_content } || '';
+    my $result = eval { decode_json($body) } || {};
+    die 'Telegram notification failed: ' . ($result->{description} || 'no response') unless $result->{ok};
+    $self->dbh->do('UPDATE tickets SET telegram_error=NULL WHERE ticket_id=?', undef, $id);
 }
 sub telegram_close { my ($self,$id)=@_; my $r=$self->_row($id); return unless $r->{telegram_chat_id} && $r->{telegram_thread_id}; eval { $self->_tg->http('deleteForumTopic',data=>{chat_id=>$r->{telegram_chat_id},message_thread_id=>$r->{telegram_thread_id}}) }; }
 
