@@ -21,7 +21,7 @@ sub _remna_id {
     my ($self,$row)=@_;
     my $cfg=$self->_cfg;
     my $prefix=$cfg->{storage_prefix} || 'vpn_mrzb_';
-    my $data=eval { $self->srv('storage', user_id=>$row->{user_id})->read(name=>$prefix.$row->{user_service_id}) } || {};
+    my $data=eval { $self->srv('storage')->read(name=>$prefix.$row->{user_service_id}) } || {};
     my $id=$data->{id} || $data->{user}{id} || $data->{response}{user}{id};
     if (!$id && $data->{shortUuid}) {
         my $resolved=$self->_request(path=>'/api/users/by-short-uuid/'.$data->{shortUuid});
