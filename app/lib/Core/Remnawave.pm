@@ -31,7 +31,8 @@ sub _request {
     return $body;
 }
 sub _owned {
-    my ($self,$uid,$usi)=@_; return $self->dbh->selectrow_hashref('SELECT us.user_service_id,us.user_id,us.service_id,s.name,s.settings FROM user_services us JOIN services s ON s.service_id=us.service_id WHERE us.user_service_id=? AND us.user_id=?',undef,$usi,$uid);
+    # Service settings are stored on user_services in SHM; services has config, not settings.
+    my ($self,$uid,$usi)=@_; return $self->dbh->selectrow_hashref('SELECT us.user_service_id,us.user_id,us.service_id,us.settings,s.name,s.config FROM user_services us JOIN services s ON s.service_id=us.service_id WHERE us.user_service_id=? AND us.user_id=?',undef,$usi,$uid);
 }
 sub _remna_id {
     my ($self,$row)=@_;
@@ -51,7 +52,7 @@ sub _remna_id {
     die 'Remnawave numeric user id is not found for this service' unless defined $id && "$id" =~ /^\d+$/ && $id > 0;
     return int($id);
 }
-sub _limit { my ($self,$row)=@_; my $settings=eval { decode_json($row->{settings}||'{}') } || {}; return int($settings->{hwidDeviceLimit} || $settings->{hwid_device_limit} || 3) }
+sub _limit { my ($self,$row)=@_; my $settings=eval { decode_json($row->{settings}||'{}') } || {}; my $config=eval { decode_json($row->{config}||'{}') } || {}; return int($settings->{hwidDeviceLimit} || $settings->{hwid_device_limit} || $config->{hwidDeviceLimit} || $config->{hwid_device_limit} || 3) }
 sub api_hwid_list {
     my ($self,%a)=@_;
     my $result;
