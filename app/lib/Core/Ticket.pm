@@ -63,10 +63,14 @@ sub _tg {
     my $self = shift;
     my $tg = get_service('Transport::Telegram') or die 'Telegram transport is unavailable';
     my $cfg = get_service('config')->data_by_name('ticket') || {};
-    $tg->profile($cfg->{telegram_profile} || 'telegram_bot');
-    my $token = $tg->config->{token};
-    die 'Telegram ticket bot token is not configured in config.telegram.token' unless defined $token && length $token;
-    # Ticket notifications use the explicitly configured shared bot token.
+    my $name = $cfg->{telegram_profile} || 'telegram_bot';
+    my $telegram = $tg->config || {};
+    my $profile = $telegram->{$name};
+    die "Telegram ticket profile '$name' is not configured" unless ref($profile) eq 'HASH';
+    my $token = $profile->{token};
+    die "Telegram ticket token is not configured for profile '$name'" unless defined $token && length $token;
+    $tg->profile($name);
+    # Assign the current configured value even if a cached transport was reused.
     $tg->{token} = $token;
     return $tg;
 }
