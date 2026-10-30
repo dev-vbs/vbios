@@ -55,7 +55,17 @@ sub api_close { my ($self,%a)=@_; my $id=$a{ticket_id}||$a{id}; my $r=$self->_ro
 sub api_media { my ($self,%a)=@_; die 'file data is required' unless $a{data}; my $id=$self->dbh->do('INSERT INTO ticket_media(user_id,name,mime_type,size,data) VALUES(?,?,?,?,FROM_BASE64(?))',undef,$self->user_id,substr(($a{name}||'file'),0,255),$a{mime_type},length($a{data}),$a{data}); return $self->dbh->selectrow_hashref('SELECT id,name,mime_type,size,created FROM ticket_media WHERE id=?',undef,$self->insert_id) }
 sub api_media_download { my ($self,%a)=@_; my $r=$self->dbh->selectrow_hashref('SELECT * FROM ticket_media WHERE id=? AND user_id=?',undef,$a{id},$self->user_id); return $r }
 
-sub _tg { my $self=shift; my $tg=get_service('Transport::Telegram') or die 'Telegram transport is unavailable'; my $cfg=get_service('config')->data_by_name('ticket')||{}; $tg->profile($cfg->{telegram_profile}||'telegram_bot'); return $tg }
+sub _tg {
+    my $self = shift;
+    my $tg = get_service('Transport::Telegram') or die 'Telegram transport is unavailable';
+    my $cfg = get_service('config')->data_by_name('ticket') || {};
+    $tg->profile($cfg->{telegram_profile} || 'telegram_bot');
+    my $token = $tg->config->{token};
+    die 'Telegram ticket bot token is not configured in config.telegram.token' unless defined $token && length $token;
+    # Ticket notifications use the explicitly configured shared bot token.
+    $tg->{token} = $token;
+    return $tg;
+}
 sub telegram_sync {
     my ($self, $id) = @_;
     my $cfg = get_service('config')->data_by_name('ticket') || {};
