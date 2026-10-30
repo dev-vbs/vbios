@@ -38,6 +38,13 @@ sub _remna_id {
     my ($self,$row)=@_;
     my $cfg=$self->_cfg;
     my $prefix=$cfg->{storage_prefix} || 'vpn_mrzb_';
+    # Remnawave HWID endpoints require the numeric Remnawave user id. Resolve by
+    # the SHM generated username first; storage may contain a subscription id.
+    my $username_prefix=$cfg->{username_prefix} || 'vBios_us_';
+    my $resolved=eval { $self->_request(path=>'/api/users/by-username/'.$username_prefix.$row->{user_service_id}) } || {};
+    my $resolved_payload=$resolved->{response} || $resolved->{data} || $resolved;
+    my $resolved_id=ref($resolved_payload) eq 'HASH' ? ($resolved_payload->{id} || $resolved_payload->{user}{id}) : undef;
+    return int($resolved_id) if defined $resolved_id && "$resolved_id" =~ /^\d+$/ && $resolved_id > 0;
     my $data=eval { $self->srv('storage')->read(name=>$prefix.$row->{user_service_id}) } || {};
     my $id=$data->{id} || $data->{uuid} || $data->{user}{id} || $data->{user}{uuid} || $data->{response}{user}{id} || $data->{response}{user}{uuid};
     if (!$id && $data->{shortUuid}) {
@@ -45,9 +52,7 @@ sub _remna_id {
         $id=$resolved->{response}{id} || $resolved->{response}{uuid} || $resolved->{id} || $resolved->{uuid} || $resolved->{data}{id} || $resolved->{data}{uuid};
     }
     if (!$id) {
-        my $prefix=$cfg->{username_prefix} || 'vBios_us_';
-        my $resolved=eval { $self->_request(path=>'/api/users/by-username/'.$prefix.$row->{user_service_id}) } || {};
-        $id=$resolved->{response}{id} || $resolved->{response}{uuid} || $resolved->{id} || $resolved->{uuid} || $resolved->{data}{id} || $resolved->{data}{uuid} || $resolved->{response}{user}{id} || $resolved->{response}{user}{uuid};
+        $id=$resolved_payload->{id} || $resolved_payload->{uuid} || $resolved_payload->{user}{id} || $resolved_payload->{user}{uuid};
     }
     die 'Remnawave numeric user id is not found for this service' unless defined $id && "$id" =~ /^\d+$/ && $id > 0;
     return int($id);
@@ -59,7 +64,8 @@ sub api_hwid_list {
     my $ok = eval {
         my $row=$self->_owned($self->user_id,$a{user_service_id}) or die 'service not found';
         my $r=$self->_request(path=>'/api/hwid/devices/'.$self->_remna_id($row));
-        my $payload=$r->{response} || $r;
+        my $payload=$r->{response} || $r->{data} || $r;
+        $payload=$payload->{response} if ref($payload) eq 'HASH' && ref($payload->{response}) eq 'HASH';
         my $devices=ref($payload) eq 'ARRAY' ? $payload : ($payload->{devices});
         die 'unexpected Remnawave devices response' unless ref($devices) eq 'ARRAY';
         $result={devices=>$devices,limit=>$self->_limit($row)};
