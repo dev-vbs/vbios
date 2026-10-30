@@ -786,6 +786,8 @@ state $routes //= {
     GET => {
         params => {
             service_id => { type => 'integer', min => 1 },
+            parent     => { type => 'integer', min => 1 },
+            category   => { type => 'string' },
         },
         controller => 'Service',
         swagger => { summary => 'Получение услуги' },
@@ -957,7 +959,7 @@ state $routes //= {
             login   => { type => 'string', required => 1, min_length => 1, max_length => 128 },
             type    => { type => 'string', required => 1, min_length => 1, max_length => 32 },
             user_id => { type => 'integer', required => 1, min => 1 },
-            password => { type => 'string', min_length => 8, max_length => 64 },
+            password => { type => 'string', min_length => 6, max_length => 64 },
             settings => { type => 'object' },
             primary => { type => 'boolean' },
         },
@@ -1153,6 +1155,7 @@ state $routes //= {
         params => {
             user_id         => { type => 'integer', required => 1, min => 1 },
             user_service_id => { type => 'integer', required => 1, min => 1 },
+            auto_bill       => { type => 'boolean' },
         },
         swagger => { summary => 'Остановка услуги клиента' },
     },
@@ -1165,6 +1168,7 @@ state $routes //= {
         params => {
             user_id         => { type => 'integer', required => 1, min => 1 },
             user_service_id => { type => 'integer', required => 1, min => 1 },
+            auto_bill       => { type => 'boolean' },
         },
         swagger => { summary => 'Возобновление услуги клиента' },
     },
@@ -1645,6 +1649,18 @@ state $routes //= {
         swagger => { summary => 'Список промокодов' },
     },
     PUT => {
+        params => {
+            code        => { type => 'string', max_length => 64 },
+            template_id => { type => 'string' },
+            expire      => { type => 'string' },
+            settings    => { type => 'object' },
+            reusable    => { type => 'integer', min => 0, max => 1 },
+            status      => { type => 'integer', min => 0, max => 1 },
+            count       => { type => 'integer', min => 1, max => 1000 },
+            quantity    => { type => 'integer', min => 1 },
+            length      => { type => 'integer', min => 1, max => 30 },
+            prefix      => { type => 'string', max_length => 32 },
+        },
         controller => 'Promo',
         method => 'generate',
         swagger => { summary => 'Генерация промокодов' },
@@ -2534,7 +2550,6 @@ if ( my $p = $router->match( sprintf("%s:%s", $ENV{REQUEST_METHOD}, $uri )) ) {
         my $structure = $service->structure;
         for my $field ( keys %{ $structure } ) {
             my $type = $structure->{ $field }->{type} // 'string';
-            $type = 'object' if $type eq 'json';
             $type = 'string' if $type =~ /^(?:text|now|date)$/;
             $schema{ $field } = { type => $type };
         }
@@ -2837,7 +2852,7 @@ sub get_service_id {
 
 # Validate %args against a params schema defined in the route.
 # Schema format (per field):
-#   type         => 'integer' | 'number' | 'string' | 'email' | 'boolean' | 'object' | 'array'
+#   type         => 'integer' | 'number' | 'string' | 'email' | 'boolean' | 'object' | 'array' | 'json' (object или array)
 #   required     => 1   (field must be present and non-empty)
 #   min / max    => numeric bounds (for integer/number)
 #   min_length   => minimum string length
@@ -2903,6 +2918,10 @@ sub validate_params {
         elsif ( $type eq 'object' ) {
             return sprintf( "Field '%s' must be an object", $field )
                 unless ref($value) eq 'HASH';
+        }
+        elsif ( $type eq 'json' ) {
+            return sprintf( "Field '%s' must be an object or an array", $field )
+                unless ref($value) eq 'HASH' || ref($value) eq 'ARRAY';
         }
         elsif ( $type eq 'array' ) {
             return sprintf( "Field '%s' must be an array", $field )
