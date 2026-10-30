@@ -12,7 +12,11 @@ sub _request {
     my ($self,%a)=@_; my $cfg=$self->_cfg; die 'Remnawave URL is not configured' unless $cfg->{url}; die 'Remnawave API token is not configured' unless $cfg->{api_token};
     my $base=$cfg->{url}; $base =~ s{/+$}{}; my $resp=$self->_transport->http(url=>$base.$a{path},method=>$a{method}||'get',headers=>{Authorization=>'Bearer '.$cfg->{api_token},Accept=>'application/json'},content=>$a{content}||{});
     my $body=eval { $resp->json_content } || {};
-    die 'Remnawave request failed (HTTP '.$resp->code.')' unless $resp->is_success;
+    unless ($resp->is_success) {
+        my $description = ref($body) eq 'HASH' ? ($body->{message} || $body->{error} || $body->{description} || '') : '';
+        $description = substr($description, 0, 300);
+        die 'Remnawave request failed: HTTP '.$resp->code.' '.($description || $resp->status_line).' ['.$a{method}.' '.$a{path}.']';
+    }
     return $body;
 }
 sub _owned {
