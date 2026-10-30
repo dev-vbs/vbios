@@ -68,6 +68,7 @@ sub telegram_sync {
     my $m = $self->dbh->selectrow_hashref('SELECT * FROM ticket_messages WHERE ticket_id=? ORDER BY message_id DESC LIMIT 1', undef, $id) or return;
     my $tg = $self->_tg;
     my $thread = $r->{telegram_thread_id};
+    $chat = $r->{telegram_chat_id} if $thread && $r->{telegram_chat_id};
     # Forum topics are opt-in. Plain chats and ordinary groups receive messages directly.
     if ($cfg->{forum_topics} && !$thread) {
         my $response = $tg->http('createForumTopic', chat_id => $chat, data => {chat_id => $chat, name => substr("#$id $r->{subject}", 0, 128)});
@@ -87,6 +88,26 @@ sub telegram_sync {
     die 'Telegram notification failed: ' . ($result->{description} || 'no response') unless $result->{ok};
     $self->dbh->do('UPDATE tickets SET telegram_error=NULL WHERE ticket_id=?', undef, $id);
 }
-sub telegram_close { my ($self,$id)=@_; my $r=$self->_row($id); return unless $r->{telegram_chat_id} && $r->{telegram_thread_id}; eval { $self->_tg->http('deleteForumTopic',data=>{chat_id=>$r->{telegram_chat_id},message_thread_id=>$r->{telegram_thread_id}}) }; }
+sub telegram_close {
+    my ($self, $id) = @_;
+    my $r = $self->_row($id) or return;
+    return unless $r->{telegram_chat_id} && $r->{telegram_thread_id};
+    my $error;
+    eval {
+        my $response = $self->_tg->http('deleteForumTopic', chat_id => $r->{telegram_chat_id}, data => {
+            chat_id => $r->{telegram_chat_id}, message_thread_id => $r->{telegram_thread_id},
+        });
+        my $body = eval { $response->decoded_content } || '';
+        my $result = eval { decode_json($body) } || {};
+        die 'Telegram topic deletion failed: ' . ($result->{description} || 'no response') unless $result->{ok};
+        $self->dbh->do('UPDATE tickets SET telegram_error=NULL WHERE ticket_id=?', undef, $id);
+        1;
+    } or $error = $@ || 'Telegram topic deletion failed';
+    if ($error) {
+        $self->dbh->do('UPDATE tickets SET telegram_error=? WHERE ticket_id=?', undef, substr("$error", 0, 255), $id);
+        logger->error("Ticket $id: $error");
+    }
+}
+
 
 1;
