@@ -133,6 +133,17 @@ state $routes //= {
         swagger => { summary => 'Регистрация пользователя' },
     },
 },
+'/user/profile' => {
+    POST => {
+        controller => 'User',
+        method => 'api_profile_update',
+        params => {
+            full_name => { type => 'string', required => 0, min_length => 1, max_length => 64 },
+            phone => { type => 'string', required => 0, max_length => 32 },
+        },
+        swagger => { summary => 'Изменение личных данных пользователя' },
+    },
+},
 '/user/referrals' => {
     swagger => { tags => 'Пользователи' },
     GET => {
