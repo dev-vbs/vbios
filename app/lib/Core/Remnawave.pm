@@ -9,13 +9,24 @@ sub _cfg { get_service('config')->data_by_name('remna') || {} }
 sub _transport { get_service('Transport::Http') }
 sub found_rows { 1 }
 sub _request {
-    my ($self,%a)=@_; my $cfg=$self->_cfg; die 'Remnawave URL is not configured' unless $cfg->{url}; die 'Remnawave API token is not configured' unless $cfg->{api_token};
-    my $base=$cfg->{url}; $base =~ s{/+$}{}; my $resp=$self->_transport->http(url=>$base.$a{path},method=>$a{method}||'get',headers=>{Authorization=>'Bearer '.$cfg->{api_token},Accept=>'application/json'},content=>$a{content}||{});
-    my $body=eval { $resp->json_content } || {};
+    my ($self,%a)=@_; my $cfg=$self->_cfg;
+    die 'Remnawave URL is not configured' unless $cfg->{url};
+    die 'Remnawave API token is not configured' unless $cfg->{api_token};
+    my $base=$cfg->{url}; $base =~ s{/+$}{};
+    my $method=lc($a{method} || 'get');
+    my %request=(url=>$base.$a{path}, method=>$method,
+        headers=>{Authorization=>'Bearer '.$cfg->{api_token},Accept=>'application/json'});
+    $request{content_type}='application/json; charset=utf-8' if $method ne 'get';
+    $request{content}=$a{content} if exists $a{content} && $method ne 'get';
+    my $resp=$self->_transport->http(%request);
+    my $body=eval { $resp->json_content };
+    $body = {} unless defined $body;
     unless ($resp->is_success) {
-        my $description = ref($body) eq 'HASH' ? ($body->{message} || $body->{error} || $body->{description} || '') : '';
+        my $description = ref($body) eq 'HASH' ? ($body->{message} || $body->{error} || $body->{description} || $body->{response}{message} || '') : '';
+        $description ||= eval { $resp->decoded_content } || '';
         $description = substr($description, 0, 300);
-        die 'Remnawave request failed: HTTP '.$resp->code.' '.($description || $resp->status_line).' ['.$a{method}.' '.$a{path}.']';
+        $description =~ s/[\r\n]+/ /g;
+        die 'Remnawave request failed: HTTP '.$resp->code.' '.($description || $resp->status_line).' ['.$method.' '.$a{path}.']';
     }
     return $body;
 }
@@ -37,20 +48,33 @@ sub _remna_id {
         my $resolved=eval { $self->_request(path=>'/api/users/by-username/'.$prefix.$row->{user_service_id}) } || {};
         $id=$resolved->{response}{id} || $resolved->{response}{uuid} || $resolved->{id} || $resolved->{uuid} || $resolved->{data}{id} || $resolved->{data}{uuid} || $resolved->{response}{user}{id} || $resolved->{response}{user}{uuid};
     }
-    die 'Remnawave user id is not found for this service' unless defined $id && "$id" =~ /^[A-Za-z0-9_-]+$/;
-    return $id;
+    die 'Remnawave numeric user id is not found for this service' unless defined $id && "$id" =~ /^\d+$/ && $id > 0;
+    return int($id);
 }
 sub _limit { my ($self,$row)=@_; my $settings=eval { decode_json($row->{settings}||'{}') } || {}; return int($settings->{hwidDeviceLimit} || $settings->{hwid_device_limit} || 3) }
 sub api_hwid_list {
     my ($self,%a)=@_;
-    my $row=$self->_owned($self->user_id,$a{user_service_id}) or die 'HWID: service not found';
-    my $r=$self->_request(path=>'/api/hwid/devices/'.$self->_remna_id($row));
-    my $payload=$r->{response} || $r;
-    my $devices=ref($payload) eq 'ARRAY' ? $payload : ($payload->{devices} || $payload->{data});
-    die 'HWID: unexpected Remnawave devices response' unless ref($devices) eq 'ARRAY';
-    return {devices=>$devices,limit=>$self->_limit($row)};
+    my $result;
+    my $ok = eval {
+        my $row=$self->_owned($self->user_id,$a{user_service_id}) or die 'service not found';
+        my $r=$self->_request(path=>'/api/hwid/devices/'.$self->_remna_id($row));
+        my $payload=$r->{response} || $r;
+        my $devices=ref($payload) eq 'ARRAY' ? $payload : ($payload->{devices});
+        die 'unexpected Remnawave devices response' unless ref($devices) eq 'ARRAY';
+        $result={devices=>$devices,limit=>$self->_limit($row)};
+        1;
+    };
+    unless ($ok) {
+        my $error = $@ || 'unknown request error';
+        $error =~ s/[\r\n]+/ /g;
+        get_service('report')->status(400);
+        get_service('report')->add_error('HWID: '.$error);
+        return undef;
+    }
+    return $result;
 }
 sub _reset_count { my ($self,$uid,$usi)=@_; my $day=(localtime)[5]+1900 . sprintf('%02d',(localtime)[4]+1) . sprintf('%02d',(localtime)[3]); return $self->cache->increment('remna-hwid-'.$uid.'-'.$usi.'-'.$day,86400) }
-sub api_hwid_delete { my ($self,%a)=@_; my $row=$self->_owned($self->user_id,$a{user_service_id}) or die 'service not found'; die 'hwid is required' unless defined $a{hwid} && length $a{hwid}; my $count=$self->_reset_count($self->user_id,$row->{user_service_id}); die 'daily HWID limit exceeded' if $count > $self->_limit($row); my $r=$self->_request(path=>'/api/hwid/devices/delete',method=>'post',content=>{userId=>$self->_remna_id($row),hwid=>$a{hwid}}); return { ok=>1,data=>$r } }
-sub api_hwid_reset { my ($self,%a)=@_; my $row=$self->_owned($self->user_id,$a{user_service_id}) or die 'service not found'; my $list=$self->api_hwid_list(user_service_id=>$row->{user_service_id}); my $devices=$list->{data}; $devices=$devices->{devices} if ref($devices) eq 'HASH' && ref($devices->{devices}) eq 'ARRAY'; $devices=[] unless ref($devices) eq 'ARRAY'; my $n=scalar @$devices; return {ok=>1,deleted=>0} unless $n; my $count=$self->_reset_count($self->user_id,$row->{user_service_id}); die 'daily HWID limit exceeded' if $count+$n-1 > $self->_limit($row); my $r=$self->_request(path=>'/api/hwid/devices/delete-all',method=>'post',content=>{userId=>$self->_remna_id($row)}); return {ok=>1,deleted=>$n,data=>$r} }
+sub _api_error { my ($self,$error)=@_; $error ||= 'unknown request error'; $error =~ s/[\r\n]+/ /g; get_service('report')->status(400); get_service('report')->add_error('HWID: '.substr($error,0,500)); return undef }
+sub api_hwid_delete { my ($self,%a)=@_; my $result; my $ok=eval { my $row=$self->_owned($self->user_id,$a{user_service_id}) or die 'service not found'; die 'hwid is required' unless defined $a{hwid} && length $a{hwid}; my $count=$self->_reset_count($self->user_id,$row->{user_service_id}); die 'daily HWID limit exceeded' if $count > $self->_limit($row); my $r=$self->_request(path=>'/api/hwid/devices/delete',method=>'post',content=>{userId=>$self->_remna_id($row),hwid=>$a{hwid}}); $result={ok=>1,data=>$r}; 1 }; return $ok ? $result : $self->_api_error($@) }
+sub api_hwid_reset { my ($self,%a)=@_; my $result; my $ok=eval { my $row=$self->_owned($self->user_id,$a{user_service_id}) or die 'service not found'; my $list=$self->api_hwid_list(user_service_id=>$row->{user_service_id}) or die 'unable to read HWID devices'; my $devices=$list->{devices}; $devices=[] unless ref($devices) eq 'ARRAY'; my $n=scalar @$devices; if (!$n) { $result={ok=>1,deleted=>0}; } else { my $count=$self->_reset_count($self->user_id,$row->{user_service_id}); die 'daily HWID limit exceeded' if $count+$n-1 > $self->_limit($row); my $r=$self->_request(path=>'/api/hwid/devices/delete-all',method=>'post',content=>{userId=>$self->_remna_id($row)}); $result={ok=>1,deleted=>$n,data=>$r}; } 1 }; return $ok ? $result : $self->_api_error($@) }
 1;
