@@ -489,6 +489,15 @@ state $routes //= {
         swagger => { summary => 'Смена тарифа' },
     },
 },
+'/user/service/*/hwid' => {
+    splat_to => 'user_service_id',
+    GET => { controller => 'Remnawave', method => 'api_hwid_list', params => { user_service_id => { type => 'integer', required => 1, min => 1 } } },
+    DELETE => { controller => 'Remnawave', method => 'api_hwid_delete', params => { user_service_id => { type => 'integer', required => 1, min => 1 }, hwid => { type => 'string', required => 1, max_length => 255 } } },
+},
+'/user/service/*/hwid/reset' => {
+    splat_to => 'user_service_id',
+    POST => { controller => 'Remnawave', method => 'api_hwid_reset', params => { user_service_id => { type => 'integer', required => 1, min => 1 } } },
+},
 '/user/withdraw' => {
     swagger => { tags => 'Пользователи' },
     GET => {
