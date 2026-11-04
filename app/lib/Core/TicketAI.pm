@@ -55,7 +55,16 @@ sub reply {
         $request->content($json->encode({model=>$ai->{model} || 'dashscope/qwen3.5-flash',messages=>\@messages,max_tokens=>_limit($ai->{max_tokens},1600,4000),stream=>JSON::false()}));
         my $ua=LWP::UserAgent->new(timeout=>_limit($ai->{timeout_seconds},15,30),max_size=>2_000_000,requests_redirectable=>[]);
         my $response=$ua->request($request);
-        die 'provider_http_' . $response->code unless $response->is_success;
+        unless ($response->is_success) {
+            my $detail = eval { $json->decode($response->content)->{error}{message} } || '';
+            $detail = '' if ref($detail);
+            $detail =~ s/\Q$key\E/[REDACTED]/g;
+            $detail =~ s/Bearer\s+\S+/Bearer [REDACTED]/gi;
+            $detail =~ s/sk-[A-Za-z0-9_-]+/[REDACTED]/g;
+            $detail =~ s/eyJ[A-Za-z0-9_.-]+/[REDACTED]/g;
+            $detail =~ s/[\r\n\t]+/ /g;
+            die 'provider_http_' . $response->code . ' detail=' . substr($detail,0,160) . "\n";
+        }
         my $body=$json->decode($response->content);
         my $answer=$body->{choices}[0]{message}{content};
         die 'Empty AI response' unless defined $answer && !ref($answer) && $answer =~ /\S/;
@@ -81,7 +90,8 @@ sub reply {
     } or do {
         # Redacted error code only; never persist the response body or request key.
         my $error = $@ || '';
-        my $code = $error =~ /provider_http_(\d+)/ ? 'HTTP '.$1 : 'AI response or persistence failed';
+        my $code = $error =~ /provider_http_(\d+) detail=([^\n]*)/ ? 'HTTP '.$1.' '.$2 : 'AI response or persistence failed';
+        $code=substr($code,0,240);
         $db->do("UPDATE ticket_ai_jobs SET status='error',error=? WHERE source_message_id=?",undef,$code,$mid);
     };
 }
