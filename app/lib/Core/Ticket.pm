@@ -47,6 +47,7 @@ sub api_create {
         my $error = $@ || 'Telegram synchronization failed';
         $self->dbh->do('UPDATE tickets SET telegram_error=? WHERE ticket_id=?', undef, substr("$error", 0, 255), $id);
     };
+    $self->_ai_reply_safe($id);
     return $self->_result($id,1);
 }
 sub _add_message {
@@ -54,7 +55,7 @@ sub _add_message {
     for my $media_id (@{$media||[]}) { $self->dbh->do('INSERT IGNORE INTO ticket_message_media(message_id,media_id) SELECT ?,id FROM ticket_media WHERE id=? AND user_id=?',undef,$mid,$media_id,$uid) }
     $self->dbh->do('UPDATE tickets SET status=?,updated=NOW() WHERE ticket_id=?',undef,$admin?'waiting':'open',$tid); return $mid;
 }
-sub api_message { my ($self,%a)=@_; my $id=$a{ticket_id}||$a{id}; my $r=$self->_row($id); die 'ticket not found' unless $r && $r->{user_id}==$self->user_id; die 'ticket closed' if $r->{status} eq 'closed'; my $mid=$self->_add_message($id,$self->user_id,0,substr(($a{message}//''),0,10000),$a{media_ids}); eval { $self->telegram_sync($id); 1 } or $self->dbh->do('UPDATE tickets SET telegram_error=? WHERE ticket_id=?',undef,substr("$@",0,255),$id); return $self->dbh->selectrow_hashref('SELECT * FROM ticket_messages WHERE message_id=?',undef,$mid) }
+sub api_message { my ($self,%a)=@_; my $id=$a{ticket_id}||$a{id}; my $r=$self->_row($id); die 'ticket not found' unless $r && $r->{user_id}==$self->user_id; die 'ticket closed' if $r->{status} eq 'closed'; my $mid=$self->_add_message($id,$self->user_id,0,substr(($a{message}//''),0,10000),$a{media_ids}); eval { $self->telegram_sync($id); 1 } or $self->dbh->do('UPDATE tickets SET telegram_error=? WHERE ticket_id=?',undef,substr("$@",0,255),$id); $self->_ai_reply_safe($id); return $self->dbh->selectrow_hashref('SELECT * FROM ticket_messages WHERE message_id=?',undef,$mid) }
 sub api_close { my ($self,%a)=@_; my $id=$a{ticket_id}||$a{id}; my $r=$self->_row($id); die 'ticket not found' unless $r && $r->{user_id}==$self->user_id; $self->dbh->do("UPDATE tickets SET status='closed',closed_at=NOW(),updated=NOW() WHERE ticket_id=?",undef,$id); $self->telegram_close($id); return $self->_result($id,1) }
 sub api_media { my ($self,%a)=@_; die 'file data is required' unless $a{data}; my $id=$self->dbh->do('INSERT INTO ticket_media(user_id,name,mime_type,size,data) VALUES(?,?,?,?,FROM_BASE64(?))',undef,$self->user_id,substr(($a{name}||'file'),0,255),$a{mime_type},length($a{data}),$a{data}); return $self->dbh->selectrow_hashref('SELECT id,name,mime_type,size,created FROM ticket_media WHERE id=?',undef,$self->insert_id) }
 sub api_media_download { my ($self,%a)=@_; my $r=$self->dbh->selectrow_hashref('SELECT * FROM ticket_media WHERE id=? AND user_id=?',undef,$a{id},$self->user_id); return $r }
@@ -151,5 +152,11 @@ sub telegram_close {
     }
 }
 
+
+sub _ai_reply_safe {
+    my ($self,$id)=@_;
+    eval { require Core::TicketAI; Core::TicketAI->reply($self,$id); 1 }
+        or logger->error("Ticket $id: AI failed; user message remains saved");
+}
 
 1;
