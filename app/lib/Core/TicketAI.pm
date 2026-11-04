@@ -9,8 +9,8 @@ use Core::System::ServiceManager qw(get_service);
 
 sub _limit {
     my ($value,$default,$max)=@_;
-    return $default unless defined $value && $value =~ /^\d+$/ && $value > 0;
-    return $value > $max ? $max : $value;
+    return int($default) unless defined $value && $value =~ /^\d+$/ && $value > 0;
+    return int($value > $max ? $max : $value);
 }
 
 sub reply {
