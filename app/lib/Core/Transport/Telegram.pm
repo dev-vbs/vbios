@@ -1424,7 +1424,7 @@ sub ticket_private_reply {
     my $ticket=$user->srv('Ticket');
     $ticket->_notify_safe($link->{ticket_id});
     # A human has already responded: do not invoke AI on this reply.
-    $self->http('sendMessage',data=>{chat_id=>$chat,text=>'✅ Ответ сохранён в тикете #'.$link->{ticket_id}.'. История доступна в личном кабинете.'});
+    $self->http('sendMessage',data=>{chat_id=>$chat,text=>'✅ Ответ сохранён в тикете #'.$link->{ticket_id}.'. История доступна в личном кабинете.',reply_markup=>q({"remove_keyboard":true})});
     return 1;
 }
 
