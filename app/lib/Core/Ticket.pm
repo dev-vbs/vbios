@@ -96,8 +96,58 @@ sub api_message {
     return $db->selectrow_hashref('SELECT * FROM ticket_messages WHERE message_id=?',undef,$mid);
 }
 sub api_close { my ($self,%a)=@_; my $id=$a{ticket_id}||$a{id}; my $r=$self->_row($id); die 'ticket not found' unless $r && $r->{user_id}==$self->user_id; $self->dbh->do("UPDATE tickets SET status='closed',closed_at=NOW(),updated=NOW() WHERE ticket_id=?",undef,$id); $self->dbh->commit; $self->telegram_close($id); return $self->_result($id,1) }
-sub api_media { my ($self,%a)=@_; die 'file data is required' unless $a{data}; my $id=$self->dbh->do('INSERT INTO ticket_media(user_id,name,mime_type,size,data) VALUES(?,?,?,?,FROM_BASE64(?))',undef,$self->user_id,substr(($a{name}||'file'),0,255),$a{mime_type},length($a{data}),$a{data}); return $self->dbh->selectrow_hashref('SELECT id,name,mime_type,size,created FROM ticket_media WHERE id=?',undef,$self->insert_id) }
-sub api_media_download { my ($self,%a)=@_; my $r=$self->dbh->selectrow_hashref('SELECT * FROM ticket_media WHERE id=? AND user_id=?',undef,$a{id},$self->user_id); return $r }
+sub _media_storage_config {
+    my $ticket_config=get_service('config')->data_by_name('ticket') || {};
+    return $ticket_config->{storage} || {};
+}
+sub api_media {
+    my ($self,%a)=@_;
+    require Core::TicketStorage;
+    require MIME::Base64;
+    my ($bytes,$mime,$ext)=Core::TicketStorage->decode_image($a{data});
+    my $cfg=$self->_media_storage_config;
+    my ($storage,$key);
+    if (($cfg->{provider}||'database') eq 'yandex') {
+        $storage=Core::TicketStorage->new($cfg);
+        $key=$storage->key($self->user_id,$ext);
+        $storage->request('PUT',$cfg->{bucket},$key,$bytes,$mime);
+    } elsif (($cfg->{provider}||'database') ne 'database') {
+        die 'Unsupported ticket storage provider';
+    }
+    my $db=$self->dbh;
+    local $db->{RaiseError}=1;
+    local $db->{PrintError}=0;
+    my $id;
+    eval {
+        $db->do('INSERT INTO ticket_media(user_id,name,mime_type,size,data) VALUES(?,?,?,?,FROM_BASE64(?))',
+            undef,$self->user_id,substr(($a{name}||'image.'.$ext),0,255),$mime,length($bytes),MIME::Base64::encode_base64($storage?'':$bytes,''));
+        $id=$self->insert_id;
+        $db->do('INSERT INTO ticket_media_objects(media_id,bucket,object_key) VALUES(?,?,?)',undef,$id,$cfg->{bucket},$key) if $storage;
+        $db->commit or die 'Attachment commit failed';
+        1;
+    } or do {
+        my $error=$@;
+        eval {$db->rollback};
+        eval {$storage->request('DELETE',$cfg->{bucket},$key)} if $storage;
+        die $error;
+    };
+    return $db->selectrow_hashref('SELECT id,name,mime_type,size,created FROM ticket_media WHERE id=?',undef,$id);
+}
+sub api_media_download {
+    my ($self,%a)=@_;
+    # Ownership is checked before any network request. Bucket is never public.
+    my $r=$self->dbh->selectrow_hashref('SELECT * FROM ticket_media WHERE id=? AND user_id=?',undef,$a{id},$self->user_id);
+    die 'Attachment not found' unless $r;
+    my $object=$self->dbh->selectrow_hashref('SELECT bucket,object_key FROM ticket_media_objects WHERE media_id=?',undef,$r->{id});
+    my $bytes=$r->{data};
+    if ($object) {
+        require Core::TicketStorage;
+        my $storage=Core::TicketStorage->new($self->_media_storage_config);
+        $bytes=$storage->request('GET',$object->{bucket},$object->{object_key});
+    }
+    require MIME::Base64;
+    return {id=>$r->{id},name=>$r->{name},mime_type=>$r->{mime_type},size=>length($bytes),data=>MIME::Base64::encode_base64($bytes,'')};
+}
 
 sub _tg {
     my $self = shift;
