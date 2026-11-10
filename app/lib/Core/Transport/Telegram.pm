@@ -1345,7 +1345,7 @@ sub ticket_group_update {
     $self->dbh->commit;
     if ($user_chat) {
         my $response=$self->http('sendMessage',data=>{chat_id=>$user_chat,
-            text=>'Ответ поддержки по тикету #'.$row->{ticket_id}."\n\n".substr($text,0,3400),
+            text=>'💬 Ответ поддержки по тикету #'.$row->{ticket_id}."\n\n".substr($text,0,3200)."\n\nЧтобы продолжить, нажмите «↩️ Ответить» и отправьте текст ответом на сообщение бота. Также можно использовать обычный Telegram Reply на этом уведомлении.",
             reply_markup=>{inline_keyboard=>[[{text=>'↩️ Ответить',callback_data=>'ticket_reply '.$row->{ticket_id}}]]}});
         my $sent=eval {decode_json($response->decoded_content)} || {};
         if ($sent->{ok}) {
@@ -1382,9 +1382,13 @@ sub ticket_private_reply {
             $self->http('sendMessage',data=>{chat_id=>$chat,text=>'Обращение закрыто или недоступно. Создайте новое в кабинете.'});
             return 1;
         }
-        my $response=$self->http('sendMessage',data=>{chat_id=>$chat,text=>'Ответ на тикет #'.$tid.'. Напишите текст ответом на это сообщение. Для отмены отправьте /start.',reply_markup=>{force_reply=>1,selective=>1}});
+        my $response=$self->http('sendMessage',data=>{chat_id=>$chat,text=>'✍️ Ответ на тикет #'.$tid."\n\nНапишите текст ответом на это сообщение. Для отмены отправьте /start. Картинки прикладывайте в личном кабинете.",reply_markup=>q({"force_reply":true})});
         my $sent=eval {decode_json($response->decoded_content)} || {};
-        $self->ticket_link_reply($chat,$sent->{result}{message_id},$tid,$uid) if $sent->{ok};
+        if ($sent->{ok}) {
+            $self->ticket_link_reply($chat,$sent->{result}{message_id},$tid,$uid);
+        } else {
+            $self->http('sendMessage',data=>{chat_id=>$chat,text=>'Не удалось открыть форму ответа. Попробуйте /tickets или личный кабинет.'});
+        }
         return 1;
     }
     return 0 if $cb->{id};
