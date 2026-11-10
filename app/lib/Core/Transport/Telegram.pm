@@ -1294,6 +1294,10 @@ sub process_message {
         }
     }
 
+    if ($user && !$user->is_blocked && $self->ticket_private_reply($user)) {
+        return {};
+    }
+
     my $response = $self->exec_template(
         cmd => $cmd,
     );
@@ -1316,6 +1320,7 @@ sub ticket_group_update {
     my $cfg = cfg('ticket') || {};
     my $admin_chat = $cfg->{id} || $cfg->{admin_chat_id};
     my $msg = $self->message || {};
+    return {} if $msg->{from}{is_bot};
     return {} unless $admin_chat && ($msg->{chat}{id}||'') eq $admin_chat;
     my $thread = $msg->{message_thread_id};
     return {} unless $thread;
@@ -1328,14 +1333,95 @@ sub ticket_group_update {
         return {};
     }
     return {} unless length $text;
-    $self->dbh->do('INSERT INTO ticket_messages(ticket_id,user_id,is_admin,message) VALUES(?,?,1,?)',undef,$row->{ticket_id},0,$text);
+    my $received=$self->dbh->do('INSERT IGNORE INTO ticket_telegram_received(profile,chat_id,telegram_message_id,ticket_id) VALUES(?,?,?,?)',undef,$self->profile_name,$admin_chat,$msg->{message_id},$row->{ticket_id});
+    return {} unless $received && $received ne '0E0';
+    $self->dbh->do('INSERT INTO ticket_messages(ticket_id,user_id,is_admin,message) VALUES(?,?,1,?)',undef,$row->{ticket_id},0,substr($text,0,10000));
     $self->dbh->do("UPDATE tickets SET status='waiting',updated=NOW() WHERE ticket_id=?",undef,$row->{ticket_id});
     my $u = $self->user($row->{user_id});
     my $tg_data = $u ? ($u->settings->{telegram} || {}) : {};
     my $profile_data = $tg_data->{$self->profile_name} || $tg_data;
     my $user_chat = $profile_data->{chat_id} || $profile_data->{user_id};
-    $self->http('sendMessage',data=>{chat_id=>$user_chat,text=>'Ответ поддержки по тикету #'.$row->{ticket_id}."\n\n".$text}) if $user_chat;
+    # Commit support reply before the network call. Telegram cannot roll back SHM.
+    $self->dbh->commit;
+    if ($user_chat) {
+        my $response=$self->http('sendMessage',data=>{chat_id=>$user_chat,
+            text=>'Ответ поддержки по тикету #'.$row->{ticket_id}."\n\n".substr($text,0,3400),
+            reply_markup=>{inline_keyboard=>[[{text=>'↩️ Ответить',callback_data=>'ticket_reply '.$row->{ticket_id}}]]}});
+        my $sent=eval {decode_json($response->decoded_content)} || {};
+        if ($sent->{ok}) {
+            $self->ticket_link_reply($user_chat,$sent->{result}{message_id},$row->{ticket_id},$row->{user_id});
+        } else {
+            $self->dbh->do('UPDATE tickets SET telegram_error=? WHERE ticket_id=?',undef,'Support reply delivery failed',$row->{ticket_id});
+            $self->dbh->commit;
+        }
+    }
     return {};
+}
+
+
+# Message-to-ticket binding is server-side: never trust quoted text or ticket ID alone.
+sub ticket_link_reply {
+    my ($self,$chat,$message,$ticket,$uid)=@_;
+    return unless $message;
+    $self->dbh->do('INSERT IGNORE INTO ticket_telegram_links(profile,chat_id,telegram_message_id,ticket_id,user_id) VALUES(?,?,?,?,?)',undef,$self->profile_name,$chat,$message,$ticket,$uid);
+    $self->dbh->commit;
+}
+
+sub ticket_private_reply {
+    my ($self,$user)=@_;
+    my $msg=$self->message || {};
+    my $cb=$self->get_callback_query || {};
+    my $chat=$msg->{chat}{id};
+    return 0 unless $chat && ($msg->{chat}{type}||'') eq 'private';
+    my $uid=$user->id;
+    if (($cb->{data}||'') =~ /^ticket_reply ([1-9][0-9]*)$/) {
+        my $tid=$1;
+        my $row=$self->dbh->selectrow_hashref('SELECT ticket_id,status FROM tickets WHERE ticket_id=? AND user_id=?',undef,$tid,$uid);
+        $self->http('answerCallbackQuery',data=>{callback_query_id=>$cb->{id}});
+        unless ($row && $row->{status} ne 'closed') {
+            $self->http('sendMessage',data=>{chat_id=>$chat,text=>'Обращение закрыто или недоступно. Создайте новое в кабинете.'});
+            return 1;
+        }
+        my $response=$self->http('sendMessage',data=>{chat_id=>$chat,text=>'Ответ на тикет #'.$tid.'. Напишите текст ответом на это сообщение. Для отмены отправьте /start.',reply_markup=>{force_reply=>1,selective=>1}});
+        my $sent=eval {decode_json($response->decoded_content)} || {};
+        $self->ticket_link_reply($chat,$sent->{result}{message_id},$tid,$uid) if $sent->{ok};
+        return 1;
+    }
+    return 0 if $cb->{id};
+    my $quoted=$msg->{reply_to_message}{message_id} || return 0;
+    # A command cancels this attempt and follows the normal menu flow.
+    return 0 if ($msg->{text}||'') =~ m{^/};
+    my $link=$self->dbh->selectrow_hashref('SELECT ticket_id FROM ticket_telegram_links WHERE profile=? AND chat_id=? AND telegram_message_id=? AND user_id=?',undef,$self->profile_name,$chat,$quoted,$uid);
+    return 0 unless $link;
+    my $text=$msg->{text} || $msg->{caption} || '';
+    unless ($text =~ /\S/ && !$msg->{photo} && !$msg->{document} && !$msg->{video}) {
+        $self->http('sendMessage',data=>{chat_id=>$chat,text=>'Здесь поддерживается текстовый ответ. Картинки приложите к тикету в личном кабинете.'});
+        return 1;
+    }
+    my $db=$self->dbh;
+    local $db->{RaiseError}=1;
+    local $db->{PrintError}=0;
+    my $saved=eval {
+        my $row=$db->selectrow_hashref('SELECT ticket_id,status FROM tickets WHERE ticket_id=? AND user_id=? FOR UPDATE',undef,$link->{ticket_id},$uid);
+        die 'closed' unless $row && $row->{status} ne 'closed';
+        my $claim=$db->do('INSERT IGNORE INTO ticket_telegram_received(profile,chat_id,telegram_message_id,ticket_id) VALUES(?,?,?,?)',undef,$self->profile_name,$chat,$msg->{message_id},$link->{ticket_id});
+        if (!$claim || $claim eq '0E0') { $db->commit; return 1; }
+        $db->do('INSERT INTO ticket_messages(ticket_id,user_id,is_admin,message) VALUES(?,?,0,?)',undef,$link->{ticket_id},$uid,substr($text,0,10000));
+        $db->do("UPDATE tickets SET status='open',updated=NOW() WHERE ticket_id=?",undef,$link->{ticket_id});
+        $db->commit or die 'commit';
+        1;
+    };
+    unless ($saved) {
+        eval {$db->rollback};
+        $self->http('sendMessage',data=>{chat_id=>$chat,text=>'Ответ не сохранён: обращение закрыто или произошла ошибка. Проверьте тикет в кабинете.'});
+        return 1;
+    }
+    # The authenticated user context remains the current ticket owner.
+    my $ticket=$user->srv('Ticket');
+    $ticket->_notify_safe($link->{ticket_id});
+    # A human has already responded: do not invoke AI on this reply.
+    $self->http('sendMessage',data=>{chat_id=>$chat,text=>'✅ Ответ сохранён в тикете #'.$link->{ticket_id}.'. История доступна в личном кабинете.'});
+    return 1;
 }
 
 sub get_last_object {
